@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DriveStore, parseDocument } from './drive';
 
-const file = { id: 'test-file', name: 'sayarathy.json', version: '1' };
+const file = { id: 'test-file', name: 'sayarathy.json', version: '1', md5Checksum: 'original-content' };
 const jsonResponse = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -23,20 +23,29 @@ describe('Drive JSON storage', () => {
     expect(fetch.mock.calls[1][0]).toContain('pageToken=next');
   });
   it('reads both metadata and file content', async () => {
-    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse(file)).mockResolvedValueOnce(jsonResponse({ note: 'cloud value' })); vi.stubGlobal('fetch', fetch);
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse(file)).mockResolvedValueOnce(jsonResponse({ note: 'cloud value' })).mockResolvedValueOnce(jsonResponse(file)); vi.stubGlobal('fetch', fetch);
     expect(await new DriveStore('token').read(file.id)).toEqual({ file, data: { note: 'cloud value' } });
     expect(fetch.mock.calls[1][0]).toContain('alt=media');
   });
-  it('updates the existing file after checking its version', async () => {
+  it('updates the existing file after checking its content checksum', async () => {
     const fetch = vi.fn().mockResolvedValueOnce(jsonResponse(file)).mockResolvedValueOnce(jsonResponse({ ...file, version: '2' })); vi.stubGlobal('fetch', fetch);
     expect((await new DriveStore('token').update(file, '{"note":"updated"}')).version).toBe('2');
     expect(fetch.mock.calls[1][1].method).toBe('PATCH');
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ note: 'updated' });
   });
-  it('does not overwrite a file with a changed version', async () => {
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ ...file, version: '3' })); vi.stubGlobal('fetch', fetch);
+  it('does not overwrite a file with changed content', async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ ...file, version: '3', md5Checksum: 'other-content' })); vi.stubGlobal('fetch', fetch);
     await expect(new DriveStore('token').update(file, '{}')).rejects.toThrow('changed since you opened');
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('allows metadata-only version changes without falsely rejecting the save', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ ...file, version: '2' })).mockResolvedValueOnce(jsonResponse({ ...file, version: '3', md5Checksum: 'updated-content' })); vi.stubGlobal('fetch', fetch);
+    await expect(new DriveStore('token').update(file, '{"note":"updated"}')).resolves.toMatchObject({ version: '3' });
+    expect(fetch.mock.calls[1][1].method).toBe('PATCH');
+  });
+  it('rejects an inconsistent read if content changes between metadata requests', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(jsonResponse(file)).mockResolvedValueOnce(jsonResponse({ note: 'other content' })).mockResolvedValueOnce(jsonResponse({ ...file, md5Checksum: 'other-content' })); vi.stubGlobal('fetch', fetch);
+    await expect(new DriveStore('token').read(file.id)).rejects.toThrow('changed while it was being read');
   });
   it('handles a successful delete with an empty 204 response', async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal('fetch', fetch);

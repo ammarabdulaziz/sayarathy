@@ -1,13 +1,14 @@
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const MARKER = 'sayarathy-v1';
-const FIELDS = 'id,name,modifiedTime,version,size,webViewLink';
+const FIELDS = 'id,name,modifiedTime,version,md5Checksum,size,webViewLink';
 
 export interface DriveFile {
   id: string;
   name: string;
   modifiedTime?: string;
   version: string;
+  md5Checksum: string;
   size?: string;
   webViewLink?: string;
 }
@@ -74,16 +75,24 @@ export class DriveStore {
     const file = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
     const data = await this.request<Record<string, unknown>>(`${API}/files/${encodeURIComponent(id)}?alt=media`);
     parseDocument(JSON.stringify(data));
-    return { file, data };
+    const latest = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
+    if (!file.md5Checksum || file.md5Checksum !== latest.md5Checksum) {
+      throw new Error('The file content changed while it was being read. Retry reading it to get a consistent copy.');
+    }
+    return { file: latest, data };
   }
 
   async update(file: DriveFile, text: string): Promise<DriveFile> {
     const data = parseDocument(text);
     const latest = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(file.id)}?fields=${FIELDS}`);
-    if (latest.version !== file.version) {
+    if (!file.md5Checksum || !latest.md5Checksum) {
+      throw new Error('Could not verify the saved file content. Read the file again before saving.');
+    }
+    if (latest.md5Checksum !== file.md5Checksum) {
       throw new Error('This file changed since you opened it. Download your draft, then read the latest file before saving.');
     }
-    // A preflight version check catches stale edits, but is not an atomic lock.
+    // Drive can advance version for metadata processing; compare content instead.
+    // This preflight catches stale edits, but is not an atomic lock.
     return this.request(`${UPLOAD}/files/${encodeURIComponent(file.id)}?uploadType=media&fields=${FIELDS}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json; charset=UTF-8' }, body: JSON.stringify(data, null, 2),
     });

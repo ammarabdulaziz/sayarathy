@@ -84,7 +84,7 @@ Only application files are deployed; your JSON stays in your Google Drive.
 
 - Internet is required; offline writes and synchronization are not implemented.
 - Unsaved edits are in memory. Download a draft before leaving if you cannot save.
-- A pre-save version check detects stale documents but is **not an atomic lock**.
+- A pre-save content checksum check detects stale documents but is **not an atomic lock**.
   Truly simultaneous saves can still race. Production conflict handling needs more work.
 - Only files tagged by Sayarathy are listed. Use the same OAuth client
   across devices; the file marker lets the app rediscover files without a cached ID.

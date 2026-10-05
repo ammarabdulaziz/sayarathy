@@ -6,6 +6,7 @@ import { ACTIONS, CATEGORIES, DUE_LABELS, formatDate, formatKm, maintenanceDue, 
 import { FollowUpForm, MileageForm, ScheduleForm, ServiceForm, VehicleForm } from './forms';
 import { Badge, CarDrawing, Empty, Modal } from './ui';
 import { useInstall } from './pwa';
+import { mayAutoSync, preferredFileId, rememberFileId, resolveDriveLog, type LoadedLog } from './sync';
 
 const NAV = [{ id: 'dashboard', label: 'Overview', icon: Gauge }, { id: 'history', label: 'Service history', icon: Wrench }, { id: 'maintenance', label: 'Maintenance', icon: CalendarClock }, { id: 'followups', label: 'Follow-ups', icon: ClipboardList }, { id: 'settings', label: 'Settings', icon: Settings }] as const;
 type View = typeof NAV[number]['id'];
@@ -21,10 +22,13 @@ export default function App() {
   const [file, setFile] = useState<DriveFile | null>(null); const fileRef = useRef<DriveFile | null>(null);
   const [files, setFiles] = useState<DriveFile[]>([]);
   const [auth, setAuth] = useState<{ token: string; expiresAt: number } | null>(null);
+  const authRef = useRef(auth); authRef.current = auth;
+  const [driveLoaded, setDriveLoaded] = useState(false);
   const [clientId, setClientId] = useState(import.meta.env.VITE_GOOGLE_CLIENT_ID || '');
   const [googleReady, setGoogleReady] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
   const [busy, setBusy] = useState(''); const busyRef = useRef(false);
+  const [syncing, setSyncing] = useState(false); const syncingRef = useRef(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState(''); const [message, setMessage] = useState('');
   const [view, setView] = useState<View>(initialView);
@@ -33,8 +37,12 @@ export default function App() {
   const [search, setSearch] = useState(''); const [category, setCategory] = useState(''); const [reviewOnly, setReviewOnly] = useState(false);
   const [followupFilter, setFollowupFilter] = useState<'open' | 'done'>('open');
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
+  const syncState = useRef({ dirty, dialogOpen: false, loaded: driveLoaded });
+  syncState.current = { dirty, dialogOpen: !!dialog || !!confirmation, loaded: driveLoaded };
+  const lastSyncCheck = useRef(0);
+  const automaticSync = useRef<() => Promise<void>>(async () => {});
   const install = useInstall();
-  const canChange = !!auth && online && !busy && !dirty;
+  const canChange = !!auth && driveLoaded && online && !busy && !dirty;
   const services = sortServices(doc.services);
   const dues = doc.schedules.map(schedule => ({ schedule, due: maintenanceDue(schedule, doc) }));
   const upcoming = dues.filter(d => !['unconfigured', 'unknown'].includes(d.due.status)).sort((a,b) => ({ overdue: 0, soon: 1, upcoming: 2, unknown: 3, unconfigured: 4 })[a.due.status] - ({ overdue: 0, soon: 1, upcoming: 2, unknown: 3, unconfigured: 4 })[b.due.status] || (a.due.remainingDays ?? Infinity) - (b.due.remainingDays ?? Infinity));
@@ -58,9 +66,20 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', guard);
   }, [dirty]);
   useEffect(() => () => { if (dialog?.kind === 'attachment') URL.revokeObjectURL(dialog.url); }, [dialog]);
+  useEffect(() => {
+    if (!auth || !file) return;
+    const refresh = () => { void automaticSync.current(); };
+    const visible = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener('focus', refresh); window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', visible);
+    const interval = setInterval(refresh, 60000);
+    refresh();
+    return () => { clearInterval(interval); window.removeEventListener('focus', refresh); window.removeEventListener('online', refresh); document.removeEventListener('visibilitychange', visible); };
+  }, [auth, file?.id]);
+  useEffect(() => { if (!dialog && !confirmation && !dirty) void automaticSync.current(); }, [dialog, confirmation, dirty]);
 
   function navigate(next: View) { setView(next); const url = new URL(location.href); url.searchParams.set('view', next); history.pushState({}, '', url); }
-  function dataset(next: DriveFile | null) { fileRef.current = next; setFile(next); }
+  function dataset(next: DriveFile | null) { fileRef.current = next; setFile(next); if (next) rememberFileId(clientId.trim(), next.id); }
   function client() {
     if (!navigator.onLine) throw new Error('An internet connection is required. There are no offline saves or queued changes.');
     if (!auth || Date.now() >= auth.expiresAt - 30000) throw new Error('Reconnect Google Drive before saving.');
@@ -73,10 +92,36 @@ export default function App() {
     catch(e) { setError(e instanceof Error ? e.message : 'The operation failed. Please retry.'); if (e instanceof DriveError && e.status === 401) setAuth(null); return false; }
     finally { busyRef.current = false; setBusy(''); }
   }
-  async function loadFile(next: DriveFile, store: DriveStore) {
-    const result = await store.read(next.id); const validated = validateDocument(result.data);
-    dataset(result.file); setDoc(validated); savedDoc.current = validated; setDirty(false); setSyncedAt(new Date().toISOString());
+  function applyLoaded(result: LoadedLog) {
+    dataset(result.file); setDoc(result.doc); savedDoc.current = result.doc; setDirty(false); setDriveLoaded(true); setSyncedAt(new Date().toISOString()); lastSyncCheck.current = Date.now();
   }
+  async function loadFile(next: DriveFile, store: DriveStore) {
+    const result = await store.read(next.id); applyLoaded({ file: result.file, doc: validateDocument(result.data) });
+  }
+  automaticSync.current = async () => {
+    const session = auth; const current = fileRef.current;
+    if (!mayAutoSync({ authenticated: !!session && Date.now() < session.expiresAt - 30000, online: navigator.onLine, visible: document.visibilityState === 'visible', loaded: syncState.current.loaded, hasFile: !!current, busy: busyRef.current || syncingRef.current, dirty: syncState.current.dirty, dialogOpen: syncState.current.dialogOpen }) || !session || !current || Date.now() - lastSyncCheck.current < 5000) return;
+    lastSyncCheck.current = Date.now();
+    const safeToApply = () => authRef.current === session && fileRef.current === current && !busyRef.current && !syncState.current.dirty && !syncState.current.dialogOpen;
+    syncingRef.current = true; setSyncing(true);
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const store = new DriveStore(session.token); const latest = await store.metadata(current.id, controller.signal);
+      if (!safeToApply()) return;
+      if (latest.md5Checksum !== current.md5Checksum) {
+        const result = await store.read(current.id, controller.signal); const validated = validateDocument(result.data);
+        if (!safeToApply()) return;
+        applyLoaded({ file: result.file, doc: validated }); setError(''); setMessage('Your log was updated from Google Drive.');
+      } else {
+        dataset(latest); setFiles(previous => previous.map(f => f.id === latest.id ? latest : f)); setSyncedAt(new Date().toISOString());
+      }
+    } catch(e) {
+      if (safeToApply()) {
+        setError(e instanceof Error && e.name === 'AbortError' ? 'Automatic Drive sync timed out. Your loaded records are unchanged; it will retry while the app is open.' : e instanceof Error ? e.message : 'Automatic Drive sync failed.');
+        if (e instanceof DriveError && e.status === 401) setAuth(null);
+      }
+    } finally { clearTimeout(timeout); syncingRef.current = false; setSyncing(false); }
+  };
   function connect() {
     if (!online || !googleReady || !clientId.trim() || busyRef.current) return;
     const request = authorize(clientId.trim());
@@ -86,11 +131,20 @@ export default function App() {
       if ((dirty || editing) && fileRef.current && !found.some(f => f.id === fileRef.current!.id)) throw new Error('Your unsaved draft belongs to a different or missing Drive file. Reconnect the original account, or download and discard the draft first.');
       setAuth(next); setFiles(found);
       if (!dirty && !editing) {
-        const preferred = found.find(f => f.id === fileRef.current?.id) || (found.length === 1 ? found[0] : null);
-        if (preferred) await loadFile(preferred, store);
-        else { dataset(null); const fresh = newDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null); if (found.length > 1) { setView('settings'); setMessage('Choose the data file you want to open below.'); } }
+        setDriveLoaded(false);
+        let loaded: LoadedLog | null;
+        try { loaded = await resolveDriveLog(found, id => store.read(id), [fileRef.current?.id, preferredFileId(clientId.trim())]); }
+        catch(e) { setView('settings'); throw e; }
+        if (loaded) {
+          applyLoaded(loaded);
+          setMessage(`Synced with Google Drive. ${loaded.doc.services.length} service ${loaded.doc.services.length === 1 ? 'visit' : 'visits'} loaded automatically.`);
+        } else {
+          dataset(null); const fresh = newDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null); setDriveLoaded(true);
+          setMessage('Connected. No existing log was found in this Google account. Create your Camry log or restore a backup.');
+        }
+      } else {
+        setMessage('Google Drive reconnected. Your unsaved work has been preserved.');
       }
-      setMessage(found.length ? 'Connected to Google Drive.' : 'Connected. Create your Camry log or restore your existing backup.');
     });
   }
   async function persist(next: AppDocument, store: DriveStore) {
@@ -99,7 +153,7 @@ export default function App() {
     const text = JSON.stringify(validated, null, 2);
     if (new TextEncoder().encode(text).length > 3 * 1024 * 1024) throw new Error('The data file exceeds 3 MB. Export a backup before reducing its size.');
     const saved = fileRef.current ? await store.update(fileRef.current, text) : await store.create(text);
-    dataset(saved); savedDoc.current = validated; setDirty(false); setSyncedAt(new Date().toISOString());
+    dataset(saved); savedDoc.current = validated; setDirty(false); setDriveLoaded(true); setSyncedAt(new Date().toISOString()); lastSyncCheck.current = Date.now();
     setFiles(previous => [saved, ...previous.filter(f => f.id !== saved.id)]); setMessage('Saved to your Google Drive.');
   }
   async function mutate(next: AppDocument, label = 'Saving changes') {
@@ -139,14 +193,14 @@ export default function App() {
 
   return <div className="app-shell">
     <aside className="sidebar"><a className="brand" href="./" onClick={e => { e.preventDefault(); navigate('dashboard'); }}><span className="brand-icon">S</span><span>Sayarathy<small>Car maintenance</small></span></a><nav aria-label="Main navigation">{NAV.map(n => <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => navigate(n.id)} aria-current={view === n.id ? 'page' : undefined}><n.icon size={19} /><span>{n.label}</span>{n.id === 'followups' && openFollowups.length > 0 && <small>{openFollowups.length}</small>}</button>)}</nav><div className="sidebar-bottom"><div><Cloud size={20} /><p>Your Drive.<br /><strong>Your records.</strong></p></div>{!install.installed && <button className="install-link" onClick={() => install.available ? void install.install() : setDialog({ kind: 'install' })}><Smartphone size={17} />Install Sayarathy</button>}<a href="./privacy.html">Privacy</a><a href="./terms.html">Terms</a></div></aside>
-    <div className="app-main"><header className="topbar"><a className="mobile-brand" href="./">Sayarathy</a><span className="topbar-vehicle">{doc.vehicle.make} {doc.vehicle.model} <span>{doc.vehicle.year}</span></span><div className="connection-controls"><span className={`connection ${auth && online ? 'connected' : ''}`}>{online ? <Cloud size={15} /> : <CloudOff size={15} />}<span>{!online ? 'Internet required' : busy || (dirty ? 'Unsaved changes' : file && auth ? 'Saved to Drive' : auth ? 'New log' : 'Drive disconnected')}</span></span>{auth && file && <button className="icon-button" aria-label="Reload from Google Drive" disabled={!!busy || dirty || !online} onClick={() => void execute('Reading from Drive', () => loadFile(file, client()))}><RefreshCw size={17} /></button>}{!auth && <button className="primary small" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>Connect Drive</button>}</div></header>
+    <div className="app-main"><header className="topbar"><a className="mobile-brand" href="./">Sayarathy</a><span className="topbar-vehicle">{doc.vehicle.make} {doc.vehicle.model} <span>{doc.vehicle.year}</span></span><div className="connection-controls"><span className={`connection ${auth && online ? 'connected' : ''}`}>{online ? <Cloud size={15} /> : <CloudOff size={15} />}<span>{!online ? 'Internet required' : busy || (dirty ? 'Unsaved changes' : syncing && auth ? 'Syncing with Drive' : auth && !driveLoaded ? 'Sync needed' : file && auth ? 'Synced with Drive' : auth ? 'New log' : 'Drive disconnected')}</span></span>{auth && file && <button className="icon-button" aria-label="Reload from Google Drive" disabled={!!busy || dirty || !online} onClick={() => void execute('Syncing with Google Drive', () => loadFile(file, client()))}><RefreshCw size={17} /></button>}{!auth && <button className="primary small" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>Connect Drive</button>}</div></header>
     <main>
       {!online && <div className="notice offline" role="status"><CloudOff size={20} /><div><strong>You’re offline</strong><p>Sayarathy needs an internet connection. Saving, loading, and uploads are unavailable; changes are not queued.</p></div></div>}
       {error && <div className="notice error" role="alert"><AlertCircle size={20} /><div><strong>The operation did not finish</strong><p>{error}</p></div><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
       {message && !error && <div className="message" role="status"><Check size={16} />{message}<button className="icon-button" aria-label="Dismiss message" onClick={() => setMessage('')}><X size={15} /></button></div>}
       {dirty && <div className="notice pending"><AlertCircle size={20} /><div><strong>Your changes have not been saved to Drive</strong><p>This draft is only in this open page. Retry saving, or download a copy before leaving.</p><div className="button-row"><button className="primary small" disabled={!online || !auth || !!busy} onClick={() => void mutate(doc, 'Retrying save')}>Retry save</button><button className="small" onClick={() => exportDoc(doc)}>Download draft</button><button className="text-button" disabled={!!busy} onClick={() => confirm('Discard unsaved changes?', 'The loaded Drive version will replace this in-memory draft. Any already uploaded attachments remain in Drive.', async () => { setDoc(savedDoc.current); setDirty(false); setError(''); })}>Discard draft</button></div></div></div>}
       {!auth && <div className="connect-banner"><div><h2>Your records stay in your Google Drive</h2><p>Connect to load your log, add a service, or save a change. No account with Sayarathy is needed.</p></div><button className="primary" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>Connect Google Drive</button>{!googleReady && <button className="text-button" disabled={!!busy} onClick={() => loadGoogle().then(() => setGoogleReady(true)).catch(e => setError(e.message))}>Retry Google authorization</button>}</div>}
-      {auth && !file && !dirty && <div className="notice"><Cloud size={20} /><div><strong>Start your Camry log</strong><p>Create an empty log in Drive, or restore a backup from Settings.</p></div><button className="primary small" disabled={!canChange} onClick={() => void mutate(doc, 'Creating your log')}>Create my log</button></div>}
+      {auth && driveLoaded && !file && !dirty && <div className="notice"><Cloud size={20} /><div><strong>Start your Camry log</strong><p>Create an empty log in Drive, or restore a backup from Settings.</p></div><button className="primary small" disabled={!canChange} onClick={() => void mutate(doc, 'Creating your log')}>Create my log</button></div>}
       <div className="page-heading"><div><h1>{view === 'dashboard' ? 'Your car, at a glance.' : NAV.find(n => n.id === view)?.label}</h1><p>{view === 'dashboard' ? 'A little history makes the next service clearer.' : view === 'history' ? 'Every visit, repair, and replacement in one place.' : view === 'maintenance' ? 'Your manual or mechanic sets the intervals. We do the calculations.' : view === 'followups' ? 'Keep mechanic advice and unfinished issues in sight.' : 'Your vehicle, Google Drive connection, and backups.'}</p></div>{(view === 'dashboard' || view === 'history') && <button className="primary" disabled={!canChange} onClick={() => setDialog({ kind: 'service' })}><Plus size={18} />Add service</button>}{view === 'maintenance' && <button className="primary" disabled={!canChange} onClick={() => setDialog({ kind: 'schedule' })}><Plus size={18} />Add schedule</button>}{view === 'followups' && <button className="primary" disabled={!canChange} onClick={() => newFollowup()}><Plus size={18} />Add follow-up</button>}</div>
 
       {view === 'dashboard' && <>

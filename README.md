@@ -17,6 +17,8 @@ Google Drive. Receipts and photos are separate private Drive files.
 - JSON export and validated, confirmed backup restoration.
 - Content-checksum conflict detection and consistent-read checks.
 - Google reconnection, explicit save/error states, and in-memory retryable drafts.
+- Automatic log loading after sign-in and safe foreground refresh when returning
+  to the app, regaining connectivity, or once a minute while it is visible.
 - Installable PWA on compatible mobile and desktop browsers.
 
 The app does not supply manufacturer maintenance intervals or mechanical diagnoses.
@@ -47,6 +49,18 @@ The Google Cloud project is `sayarathy`, with the **Sayarathy** OAuth app and
 **Sayarathy Web** browser client. Google Identity Services obtains a short-lived
 `drive.file` access token in the browser; tokens are kept only in memory. No client
 secret, service account, backend, or operator-owned database is used.
+
+After authorization, the app automatically opens the last-used authorized data
+file. If no preference exists, it selects the newest valid log with records before
+considering empty duplicates. The preferred file ID is stored locally per OAuth
+client, but tokens and log contents are not. IDs absent from the currently
+authorized account are ignored.
+
+While connected and visible, the app checks file metadata on focus, on returning
+to the foreground, after regaining connectivity, and once a minute. It downloads
+the JSON only when its content checksum changes. These refreshes pause during
+forms, dialogs, confirmations, uploads, saves, and unsaved drafts. Token expiry
+still requires user-driven reconnection; there is no closed-app background sync.
 
 The public client ID is in `.env.production`. For development, use `.env.local`
 with `VITE_GOOGLE_CLIENT_ID`. Never commit authorization tokens or client secrets.

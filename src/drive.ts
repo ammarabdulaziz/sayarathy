@@ -79,16 +79,20 @@ export class DriveStore {
     });
   }
 
-  async read(id: string): Promise<{ file: DriveFile; data: Record<string, unknown> }> {
-    const file = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
+  async read(id: string, signal?: AbortSignal): Promise<{ file: DriveFile; data: Record<string, unknown> }> {
+    const file = await this.metadata(id, signal);
     if (Number(file.size || 0) > 3 * 1024 * 1024) throw new Error('This data file is too large to open (maximum 3 MB).');
-    const data = await this.request<Record<string, unknown>>(`${API}/files/${encodeURIComponent(id)}?alt=media`);
+    const data = await this.request<Record<string, unknown>>(`${API}/files/${encodeURIComponent(id)}?alt=media`, { signal });
     parseDocument(JSON.stringify(data));
-    const latest = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
+    const latest = await this.metadata(id, signal);
     if (!file.md5Checksum || file.md5Checksum !== latest.md5Checksum) {
       throw new Error('The file content changed while it was being read. Retry reading it to get a consistent copy.');
     }
     return { file: latest, data };
+  }
+
+  async metadata(id: string, signal?: AbortSignal): Promise<DriveFile> {
+    return this.request(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`, { signal });
   }
 
   async update(file: DriveFile, text: string): Promise<DriveFile> {

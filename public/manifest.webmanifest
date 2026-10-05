@@ -1,0 +1,21 @@
+{
+  "id": "./",
+  "name": "Sayarathy — Car maintenance",
+  "short_name": "Sayarathy",
+  "description": "Your car’s service history, maintenance reminders, and receipts in your own Google Drive. Internet connection required.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f6fb",
+  "theme_color": "#1746a2",
+  "lang": "en",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Service history", "url": "./?view=history" },
+    { "name": "Upcoming maintenance", "url": "./?view=maintenance" }
+  ]
+}

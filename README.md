@@ -1,17 +1,26 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
-
 # Sayarathy
 
-A static React application that authorizes Google Drive in the browser and creates,
-lists, reads, updates, and permanently deletes private JSON files. No custom
-backend, database, client secret, or service account is used.
+An installable, **online-only** car-maintenance app. Service history, maintenance
+schedules, mileage, notes, and follow-ups live in a private JSON file in your own
+Google Drive. Receipts and photos are separate private Drive files.
 
 **Website:** https://ammarabdulaziz.github.io/sayarathy/
 
-**Google Cloud project:** `sayarathy` · **OAuth application:** Sayarathy · **Client:** Sayarathy Web
+## Features
 
-This first release establishes cloud storage. Vehicle-specific screens and maintenance
-recommendations will be planned separately. It currently exposes a JSON editor and file operations.
+- Vehicle overview with current-mileage updates and upcoming maintenance.
+- Searchable, categorized service history with multi-item visits and review flags.
+- Add, edit, and delete service records; notes and linked follow-ups.
+- Editable distance/time intervals from your manual or mechanic. Whichever comes
+  first determines due status; replacement, repair, cleaning, and inspection are distinct.
+- Private PDF/JPG/PNG/WebP receipts and photos, up to 10 MB per file.
+- JSON export and validated, confirmed backup restoration.
+- Content-checksum conflict detection and consistent-read checks.
+- Google reconnection, explicit save/error states, and in-memory retryable drafts.
+- Installable PWA on compatible mobile and desktop browsers.
+
+The app does not supply manufacturer maintenance intervals or mechanical diagnoses.
+Maintenance notifications are in-app; there are no background push notifications.
 
 ## Run locally
 
@@ -20,79 +29,88 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Run `npm test` for the mocked API contract tests and
-`npm run build` for type checking and the production static build.
+Open `http://localhost:5173`. The Google client must authorize that exact origin.
 
-## Google configuration
+```sh
+npm test
+npm run build
+npm run preview
+```
 
-1. Create a project in https://console.cloud.google.com/.
-2. Under APIs & Services, enable **Google Drive API**.
-3. Configure **Google Auth Platform** branding, audience, and data access. Add
-   `https://www.googleapis.com/auth/drive.file` as the scope. For production, publish
-   an external audience with the website, privacy policy, and contact information.
-4. Create an OAuth client of type **Web application**.
-5. Add `http://localhost:5173` to **Authorized JavaScript origins**. Add the deployed
-   HTTPS origin as well (for this deployment: `https://ammarabdulaziz.github.io`, without
-   the repository path). Origins are exact, including port; a LAN HTTP IP is not a
-   substitute for localhost. Use deployed HTTPS for mobile testing.
-6. The production client ID is prefilled from `.env.production`. For another client,
-   paste the ID into the app or copy `.env.example` to `.env.local`, set
-   `VITE_GOOGLE_CLIENT_ID`, and restart Vite. The OAuth client ID is public config.
-   Never add a client secret, access token, or service-account key to the repository.
+The service worker is registered only in production builds. To test Google auth
+with `npm run preview`, register its localhost origin/port with the OAuth client,
+or serve the built app at an already authorized origin.
 
-The app uses Google Identity Services' browser token model. Tokens stay in memory,
-expire, and may require user-driven reconnection. It remembers only the public
-client ID in localStorage. Disconnect clears local authorization but does not
-revoke Google's permission grant; revoke it in your Google account permissions if needed.
+## Storage and authorization
 
-For distribution beyond personal testing, configure production publishing and
-meet Google's applicable consent/verification requirements. `drive.file` is a
-non-sensitive, per-file scope; broad access to the user's entire Drive is not needed.
+The Google Cloud project is `sayarathy`, with the **Sayarathy** OAuth app and
+**Sayarathy Web** browser client. Google Identity Services obtains a short-lived
+`drive.file` access token in the browser; tokens are kept only in memory. No client
+secret, service account, backend, or operator-owned database is used.
 
-## Live acceptance test
+The public client ID is in `.env.production`. For development, use `.env.local`
+with `VITE_GOOGLE_CLIENT_ID`. Never commit authorization tokens or client secrets.
 
-1. Connect using your OAuth client ID and Google account.
-2. Click **Create data file**. Verify `sayarathy.json` exists in your Drive.
-3. Edit `note` in the JSON editor and click **Save to Drive**.
-4. Click **Read from Drive** and confirm the updated value is fetched back.
-5. Reload, reconnect, and open the file from the list to verify persistence.
-6. Open the deployed app on your phone with the **same client ID and Google account**.
-   Connect, refresh, and open the file. Change the note, save, and read it on the laptop.
-7. For a stale-edit test, load the file on two devices, save on one, then try to save
-   the older loaded version on the other. The second save should be rejected.
-8. On a disposable test file, choose **Delete file**, confirm permanent deletion,
-   and verify it disappears from both the app list and Drive.
-9. To verify browser-data recovery, first save successfully, then clear site data,
-   reopen, enter the same client ID, reconnect, and open the saved file.
+One `sayarathy.json` contains the profile, service history, schedules, follow-ups,
+and mileage readings. A **Sayarathy attachments** folder is associated with that
+dataset. Only app-tagged JSON datasets appear in the data-file chooser. Unsupported
+legacy JSON is not silently converted or overwritten; download the original first.
 
-The activity log reports actual API responses; there is no simulated Drive mode.
-Automated tests mock HTTP and do not prove that your OAuth setup works.
+Removing an attachment from a service, or deleting that service, does not delete
+the physical attachment. This preserves references in older backups. Manage those
+files in Google Drive when you want to delete them permanently. Failed partial
+uploads are cleaned up where authorization and connectivity permit.
 
-## Deploy free on GitHub Pages
+JSON backups include attachment references, not the attachments' binary contents.
+Back up the Drive attachment folder separately if you need a fully independent copy.
 
-1. Push this repository to GitHub when ready.
-2. In repository Settings → Pages, set the source to **GitHub Actions**.
-3. The public client ID is configured in `.env.production`.
-4. Push to `main` or run the **Deploy GitHub Pages** workflow manually from Actions.
-5. Add the site's origin to the OAuth client's Authorized JavaScript origins.
+## Installable, not offline-enabled
 
-The included workflow builds and deploys `dist`. Relative asset paths support a
-repository URL such as `https://YOUR_USERNAME.github.io/sayarathy/`.
-Only application files are deployed; your JSON stays in your Google Drive.
+`public/manifest.webmanifest` provides a standalone window, PNG and maskable icons,
+and home-screen shortcuts. `public/sw.js` handles same-origin GET requests by
+going directly to the network, with **no CacheStorage, precaching, offline
+fallback, background sync, or interception of Google requests**.
 
-## Current boundaries
+There is no persistent vehicle-data cache or offline queue. Offline status disables
+Drive changes and loading. Unsaved edits and retryable drafts exist only in the
+open page. Download a draft before leaving if a save failed. A closed app requires
+internet access to open again.
 
-- Internet is required; offline writes and synchronization are not implemented.
-- Unsaved edits are in memory. Download a draft before leaving if you cannot save.
-- A pre-save content checksum check detects stale documents but is **not an atomic lock**.
-  Truly simultaneous saves can still race. Production conflict handling needs more work.
-- Only files tagged by Sayarathy are listed. Use the same OAuth client
-  across devices; the file marker lets the app rediscover files without a cached ID.
-- Deletion is permanent and has an explicit in-app confirmation.
-- Google storage/API quotas and policies apply. No free-forever guarantee is implied.
+- Android/Chrome: browser menu → Install app / Add to home screen.
+- iPhone/iPad: Safari → Share → Add to Home Screen.
+- Desktop Chrome/Edge: address-bar install icon or browser install menu.
 
-## References
+## Maintenance correctness
 
-- https://developers.google.com/identity/oauth2/web/guides/use-token-model
-- https://developers.google.com/drive/api/guides/api-specific-auth
-- https://developers.google.com/drive/api/guides/manage-uploads
+- Match both category and work type to find the last completion.
+- A later oil-leak repair does not reset an oil-change schedule.
+- Cleaning an AC filter does not reset its replacement schedule.
+- Missing mileage stays unknown; it is not filled from an older service.
+- Distance and date targets are calculated independently, using whichever is due first.
+- Month intervals clamp to valid month-end dates.
+- Historical service mileage is not automatically treated as current mileage.
+- The pre-save checksum check detects stale content but is **not an atomic lock**.
+  Simultaneous saves can still race; use one editing device at a time.
+
+## Deployment
+
+Push to `main` to run `.github/workflows/pages.yml`. The workflow tests, builds,
+and deploys `dist` to GitHub Pages. OAuth must authorize
+`https://ammarabdulaziz.github.io` (origin only, without the repository path).
+
+The homepage, privacy policy, and terms are public branding pages. Only app files
+are deployed; user history and attachments stay in the user's Google Drive.
+
+`private-import.json` is deliberately ignored. It is a local-only import source,
+not an application asset, fixture, or public sample. Do not commit personal history.
+
+## Verification
+
+Automated tests exercise reminder dates/distance, completion matching, missing
+data, backup validation, stale-content detection, private binary uploads, and downloads.
+Real OAuth and Drive behavior require a live signed-in browser.
+
+For a full acceptance pass: connect, restore a backup, add/edit a temporary service,
+upload and preview a receipt, configure a schedule, update mileage, add/complete a
+follow-up, export/restore, and reload from a second session. Test stale edits from
+two sessions and offline disabling. Remove temporary records afterward.

@@ -1,3 +1,5 @@
+import type { Attachment } from './model';
+
 const API = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const MARKER = 'sayarathy-v1';
@@ -28,8 +30,9 @@ export function parseDocument(text: string): Record<string, unknown> {
 export class DriveStore {
   constructor(private token: string) {}
 
-  private async request<T>(url: string, init: RequestInit = {}): Promise<T> {
+  private async response(url: string, init: RequestInit = {}): Promise<Response> {
     const response = await fetch(url, {
+      cache: 'no-store',
       ...init,
       headers: { ...init.headers, Authorization: `Bearer ${this.token}` },
     });
@@ -42,6 +45,11 @@ export class DriveStore {
         `Google Drive: ${detail}`, response.status,
       );
     }
+    return response;
+  }
+
+  private async request<T>(url: string, init: RequestInit = {}): Promise<T> {
+    const response = await this.response(url, init);
     return response.status === 204 ? undefined as T : response.json();
   }
 
@@ -50,7 +58,7 @@ export class DriveStore {
     let pageToken: string | undefined;
     do {
       const query = new URLSearchParams({
-        q: `trashed = false and appProperties has { key='application' and value='${MARKER}' }`,
+        q: `trashed = false and mimeType = 'application/json' and appProperties has { key='application' and value='${MARKER}' }`,
         fields: `nextPageToken,files(${FIELDS})`, pageSize: '100', orderBy: 'modifiedTime desc',
       });
       if (pageToken) query.set('pageToken', pageToken);
@@ -64,7 +72,7 @@ export class DriveStore {
   async create(text: string): Promise<DriveFile> {
     const data = parseDocument(text);
     const boundary = `sayarathy_${crypto.randomUUID()}`;
-    const metadata = { name: 'sayarathy.json', mimeType: 'application/json', appProperties: { application: MARKER } };
+    const metadata = { name: 'sayarathy.json', mimeType: 'application/json', appProperties: { application: MARKER, kind: 'dataset' } };
     const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(data, null, 2)}\r\n--${boundary}--\r\n`;
     return this.request(`${UPLOAD}/files?uploadType=multipart&fields=${FIELDS}`, {
       method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body,
@@ -73,6 +81,7 @@ export class DriveStore {
 
   async read(id: string): Promise<{ file: DriveFile; data: Record<string, unknown> }> {
     const file = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
+    if (Number(file.size || 0) > 3 * 1024 * 1024) throw new Error('This data file is too large to open (maximum 3 MB).');
     const data = await this.request<Record<string, unknown>>(`${API}/files/${encodeURIComponent(id)}?alt=media`);
     parseDocument(JSON.stringify(data));
     const latest = await this.request<DriveFile>(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`);
@@ -100,5 +109,33 @@ export class DriveStore {
 
   async delete(id: string): Promise<void> {
     await this.request(`${API}/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  private folders = new Map<string, string>();
+  private async attachmentFolder(datasetId: string): Promise<string> {
+    if (!/^[\w-]+$/.test(datasetId)) throw new Error('Invalid data file ID.');
+    const cached = this.folders.get(datasetId); if (cached) return cached;
+    const query = new URLSearchParams({ q: `trashed = false and mimeType = 'application/vnd.google-apps.folder' and appProperties has { key='application' and value='${MARKER}' } and appProperties has { key='dataset' and value='${datasetId}' }`, fields: 'files(id)', pageSize: '10' });
+    const found = await this.request<{ files: { id: string }[] }>(`${API}/files?${query}`);
+    const folder = found.files[0] || await this.request<{ id: string }>(`${API}/files?fields=id`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Sayarathy attachments', mimeType: 'application/vnd.google-apps.folder', appProperties: { application: MARKER, kind: 'folder', dataset: datasetId } }),
+    });
+    this.folders.set(datasetId, folder.id); return folder.id;
+  }
+
+  async uploadAttachment(datasetId: string, file: File): Promise<Attachment> {
+    if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type)) throw new Error('Receipts must be PDF, JPG, PNG, or WebP files.');
+    if (file.size > 10 * 1024 * 1024 || file.size === 0) throw new Error('Each attachment must be between 1 byte and 10 MB.');
+    const folderId = await this.attachmentFolder(datasetId);
+    const boundary = `sayarathy_${crypto.randomUUID()}`;
+    const metadata = { name: file.name, mimeType: file.type, parents: [folderId], appProperties: { application: MARKER, kind: 'attachment', dataset: datasetId } };
+    const body = new Blob([`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${file.type}\r\n\r\n`, file, `\r\n--${boundary}--\r\n`]);
+    const uploaded = await this.request<{ id: string; name: string; mimeType: string; size: string }>(`${UPLOAD}/files?uploadType=multipart&fields=id,name,mimeType,size`, { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
+    return { ...uploaded, size: Number(uploaded.size) };
+  }
+
+  async downloadAttachment(attachment: Attachment): Promise<Blob> {
+    const response = await this.response(`${API}/files/${encodeURIComponent(attachment.id)}?alt=media`);
+    return response.blob();
   }
 }

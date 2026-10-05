@@ -63,4 +63,30 @@ describe('Drive JSON storage', () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(() => parseDocument('null')).toThrow();
   });
+  it('uploads binary attachments privately to the dataset folder', async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'folder-123' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'receipt-123', name: 'receipt.pdf', mimeType: 'application/pdf', size: '7' }));
+    vi.stubGlobal('fetch', fetch);
+    const receipt = new File(['%PDF-1.'], 'receipt.pdf', { type: 'application/pdf' });
+    expect(await new DriveStore('token').uploadAttachment('dataset-123', receipt)).toMatchObject({ id: 'receipt-123', size: 7 });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ mimeType: 'application/vnd.google-apps.folder', appProperties: { dataset: 'dataset-123' } });
+    const upload = fetch.mock.calls[2][1];
+    expect(upload.headers.Authorization).toBe('Bearer token');
+    expect(await upload.body.text()).toContain('%PDF-1.');
+    expect(await upload.body.text()).toContain('folder-123');
+  });
+  it('does not upload unsupported or oversized attachments', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(new DriveStore('token').uploadAttachment('dataset-123', new File(['script'], 'file.html', { type: 'text/html' }))).rejects.toThrow('PDF');
+    await expect(new DriveStore('token').uploadAttachment('dataset-123', new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'large.pdf', { type: 'application/pdf' }))).rejects.toThrow('10 MB');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('downloads attachments with authorization and no browser caching', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('%PDF-1.', { headers: { 'Content-Type': 'application/pdf' } })); vi.stubGlobal('fetch', fetch);
+    const blob = await new DriveStore('token').downloadAttachment({ id: 'receipt-123', name: 'receipt.pdf', mimeType: 'application/pdf', size: 7 });
+    expect(await blob.text()).toBe('%PDF-1.');
+    expect(fetch.mock.calls[0][1]).toMatchObject({ cache: 'no-store', headers: { Authorization: 'Bearer token' } });
+  });
 });

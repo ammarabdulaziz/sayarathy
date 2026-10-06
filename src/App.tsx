@@ -7,24 +7,30 @@ import { FollowUpForm, MileageForm, ScheduleForm, ServiceForm, VehicleForm } fro
 import { Badge, CarDrawing, Empty, Modal } from './ui';
 import { useInstall } from './pwa';
 import { mayAutoSync, preferredFileId, rememberFileId, resolveDriveLog, type LoadedLog } from './sync';
+import { clearSession, forgetToken, readSession, sessionAuthorization, writeSession, type Authorization } from './session';
+import { applyRecommendations, OWNER_MANUAL, recommendationFor, recommendationLabel } from './recommendations';
 
 const NAV = [{ id: 'dashboard', label: 'Overview', icon: Gauge }, { id: 'history', label: 'Service history', icon: Wrench }, { id: 'maintenance', label: 'Maintenance', icon: CalendarClock }, { id: 'followups', label: 'Follow-ups', icon: ClipboardList }, { id: 'settings', label: 'Settings', icon: Settings }] as const;
+const DEFAULT_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 type View = typeof NAV[number]['id'];
 type Dialog = { kind: 'service'; service?: Service } | { kind: 'schedule'; schedule?: Schedule } | { kind: 'followup'; followup?: FollowUp } | { kind: 'mileage' | 'vehicle' | 'import' | 'install' } | { kind: 'details'; service: Service } | { kind: 'attachment'; attachment: Attachment; url: string };
 function initialView(): View { const query = new URLSearchParams(location.search).get('view'); return NAV.some(n => n.id === query) ? query as View : 'dashboard'; }
 function downloadBlob(blob: Blob, filename: string) { const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
 function exportDoc(doc: AppDocument) { downloadBlob(new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' }), `sayarathy-${todayISO()}.json`); }
 function upsert<T extends { id: string }>(items: T[], item: T): T[] { return items.some(i => i.id === item.id) ? items.map(i => i.id === item.id ? item : i) : [...items, item]; }
+function freshDocument() { return applyRecommendations(newDocument()).doc; }
 
 export default function App() {
-  const [doc, setDoc] = useState<AppDocument>(newDocument);
+  const [doc, setDoc] = useState<AppDocument>(freshDocument);
   const savedDoc = useRef(doc);
   const [file, setFile] = useState<DriveFile | null>(null); const fileRef = useRef<DriveFile | null>(null);
   const [files, setFiles] = useState<DriveFile[]>([]);
-  const [auth, setAuth] = useState<{ token: string; expiresAt: number } | null>(null);
+  const [remembered, setRemembered] = useState(() => readSession(DEFAULT_CLIENT_ID));
+  const [auth, setAuth] = useState<Authorization | null>(() => sessionAuthorization(remembered));
   const authRef = useRef(auth); authRef.current = auth;
+  const resumeOnOpen = useRef(!!auth);
   const [driveLoaded, setDriveLoaded] = useState(false);
-  const [clientId, setClientId] = useState(import.meta.env.VITE_GOOGLE_CLIENT_ID || '');
+  const [clientId, setClientId] = useState(DEFAULT_CLIENT_ID);
   const [googleReady, setGoogleReady] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
   const [busy, setBusy] = useState(''); const busyRef = useRef(false);
@@ -42,6 +48,7 @@ export default function App() {
   const lastSyncCheck = useRef(0);
   const automaticSync = useRef<() => Promise<void>>(async () => {});
   const install = useInstall();
+  const hasRememberedLogin = !!remembered && remembered.clientId === clientId.trim() && remembered.rememberUntil > Date.now();
   const canChange = !!auth && driveLoaded && online && !busy && !dirty;
   const services = sortServices(doc.services);
   const dues = doc.schedules.map(schedule => ({ schedule, due: maintenanceDue(schedule, doc) }));
@@ -58,7 +65,7 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!auth) return;
-    const timer = setTimeout(() => { setAuth(null); setMessage('Google authorization expired. Reconnect to continue. Your open record stays in memory.'); }, Math.max(0, auth.expiresAt - Date.now() - 30000));
+    const timer = setTimeout(() => { const session = invalidateAuthorization(); setMessage(session ? 'Your sign-in is remembered for one day. Continue Google Drive to renew its shorter-lived access permission. Your open record stays in memory.' : 'Your one-day session ended. Sign in again to continue. Your open record stays in memory.'); }, Math.max(0, auth.expiresAt - Date.now() - 30000));
     return () => clearTimeout(timer);
   }, [auth]);
   useEffect(() => {
@@ -77,9 +84,20 @@ export default function App() {
     return () => { clearInterval(interval); window.removeEventListener('focus', refresh); window.removeEventListener('online', refresh); document.removeEventListener('visibilitychange', visible); };
   }, [auth, file?.id]);
   useEffect(() => { if (!dialog && !confirmation && !dirty) void automaticSync.current(); }, [dialog, confirmation, dirty]);
+  useEffect(() => {
+    if (!resumeOnOpen.current || !online || !auth || busyRef.current) return;
+    resumeOnOpen.current = false;
+    void execute('Restoring your Google Drive session', () => hydrateConnection(auth, false));
+  }, [online, auth?.token]);
 
   function navigate(next: View) { setView(next); const url = new URL(location.href); url.searchParams.set('view', next); history.pushState({}, '', url); }
   function dataset(next: DriveFile | null) { fileRef.current = next; setFile(next); if (next) rememberFileId(clientId.trim(), next.id); }
+  function invalidateAuthorization() { setAuth(null); const session = forgetToken(clientId.trim()); setRemembered(session); return session; }
+  function disconnect() {
+    clearSession(clientId.trim()); setRemembered(null); setAuth(null); setFiles([]); dataset(null); setDriveLoaded(false);
+    const fresh = freshDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null);
+    setMessage('Signed out of this app. Google permission remains granted; manage it in your Google account.');
+  }
   function client() {
     if (!navigator.onLine) throw new Error('An internet connection is required. There are no offline saves or queued changes.');
     if (!auth || Date.now() >= auth.expiresAt - 30000) throw new Error('Reconnect Google Drive before saving.');
@@ -89,14 +107,19 @@ export default function App() {
     if (busyRef.current) return false;
     busyRef.current = true; setBusy(label); setError(''); setMessage('');
     try { await action(); return true; }
-    catch(e) { setError(e instanceof Error ? e.message : 'The operation failed. Please retry.'); if (e instanceof DriveError && e.status === 401) setAuth(null); return false; }
+    catch(e) { setError(e instanceof Error ? e.message : 'The operation failed. Please retry.'); if (e instanceof DriveError && e.status === 401) invalidateAuthorization(); return false; }
     finally { busyRef.current = false; setBusy(''); }
   }
-  function applyLoaded(result: LoadedLog) {
-    dataset(result.file); setDoc(result.doc); savedDoc.current = result.doc; setDirty(false); setDriveLoaded(true); setSyncedAt(new Date().toISOString()); lastSyncCheck.current = Date.now();
+  async function applyLoaded(result: LoadedLog, store: DriveStore) {
+    const defaults = applyRecommendations(result.doc);
+    dataset(result.file); setDoc(defaults.doc); savedDoc.current = result.doc; setDirty(false); setDriveLoaded(true); setSyncedAt(new Date().toISOString()); lastSyncCheck.current = Date.now();
+    if (defaults.changed) {
+      if (busyRef.current) await persist(defaults.doc, store);
+      else await execute('Saving starter recommendations', () => persist(defaults.doc, store));
+    }
   }
   async function loadFile(next: DriveFile, store: DriveStore) {
-    const result = await store.read(next.id); applyLoaded({ file: result.file, doc: validateDocument(result.data) });
+    const result = await store.read(next.id); await applyLoaded({ file: result.file, doc: validateDocument(result.data) }, store);
   }
   automaticSync.current = async () => {
     const session = auth; const current = fileRef.current;
@@ -111,41 +134,44 @@ export default function App() {
       if (latest.md5Checksum !== current.md5Checksum) {
         const result = await store.read(current.id, controller.signal); const validated = validateDocument(result.data);
         if (!safeToApply()) return;
-        applyLoaded({ file: result.file, doc: validated }); setError(''); setMessage('Your log was updated from Google Drive.');
+        await applyLoaded({ file: result.file, doc: validated }, store); setError(''); setMessage('Your log was updated from Google Drive.');
       } else {
         dataset(latest); setFiles(previous => previous.map(f => f.id === latest.id ? latest : f)); setSyncedAt(new Date().toISOString());
       }
     } catch(e) {
       if (safeToApply()) {
         setError(e instanceof Error && e.name === 'AbortError' ? 'Automatic Drive sync timed out. Your loaded records are unchanged; it will retry while the app is open.' : e instanceof Error ? e.message : 'Automatic Drive sync failed.');
-        if (e instanceof DriveError && e.status === 401) setAuth(null);
+        if (e instanceof DriveError && e.status === 401) invalidateAuthorization();
       }
     } finally { clearTimeout(timeout); syncingRef.current = false; setSyncing(false); }
   };
   function connect() {
     if (!online || !googleReady || !clientId.trim() || busyRef.current) return;
     const request = authorize(clientId.trim());
-    void execute('Connecting to Google Drive', async () => {
-      const next = await request; const store = new DriveStore(next.token); const found = await store.list();
+    resumeOnOpen.current = false;
+    void execute('Connecting to Google Drive', async () => hydrateConnection(await request, true));
+  }
+  async function hydrateConnection(next: Authorization, remember: boolean) {
+      const store = new DriveStore(next.token); const found = await store.list();
       const editing = !!dialog && ['service', 'schedule', 'followup', 'mileage', 'vehicle', 'import'].includes(dialog.kind);
       if ((dirty || editing) && fileRef.current && !found.some(f => f.id === fileRef.current!.id)) throw new Error('Your unsaved draft belongs to a different or missing Drive file. Reconnect the original account, or download and discard the draft first.');
       setAuth(next); setFiles(found);
+      if (remember) setRemembered(writeSession(clientId.trim(), next));
       if (!dirty && !editing) {
         setDriveLoaded(false);
         let loaded: LoadedLog | null;
         try { loaded = await resolveDriveLog(found, id => store.read(id), [fileRef.current?.id, preferredFileId(clientId.trim())]); }
         catch(e) { setView('settings'); throw e; }
         if (loaded) {
-          applyLoaded(loaded);
+          await applyLoaded(loaded, store);
           setMessage(`Synced with Google Drive. ${loaded.doc.services.length} service ${loaded.doc.services.length === 1 ? 'visit' : 'visits'} loaded automatically.`);
         } else {
-          dataset(null); const fresh = newDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null); setDriveLoaded(true);
+          dataset(null); const fresh = freshDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null); setDriveLoaded(true);
           setMessage('Connected. No existing log was found in this Google account. Create your Camry log or restore a backup.');
         }
       } else {
         setMessage('Google Drive reconnected. Your unsaved work has been preserved.');
       }
-    });
   }
   async function persist(next: AppDocument, store: DriveStore) {
     const validated = validateDocument({ ...next, updatedAt: new Date().toISOString() });
@@ -186,20 +212,20 @@ export default function App() {
   function serviceSummary(service: Service, compact = false) { return <button className={`service-summary ${compact ? 'compact' : ''}`} key={service.id} onClick={() => setDialog({ kind: 'details', service })}><div className="service-date"><strong>{formatDate(service.date)}</strong><span>{formatKm(service.odometerKm)}</span></div><div className="service-description"><h3>{service.items[0]?.description}{service.items.length > 1 && <small> +{service.items.length - 1} more</small>}</h3><p>{[...new Set(service.items.map(i => CATEGORIES[i.category]))].join(', ')}</p><div className="inline-tags">{service.needsReview && <Badge kind="soon">Needs clarification</Badge>}{service.attachments.length > 0 && <span className="attachment-count"><Paperclip size={12} />{service.attachments.length}</span>}</div></div><ChevronRight size={18} /></button>; }
   function dueRow(schedule: Schedule) {
     const due = maintenanceDue(schedule, doc);
-    return <div className="maintenance-row" key={schedule.id}><div className={`maintenance-icon ${due.status}`}><Wrench size={18} /></div><div className="maintenance-content"><div className="row-title"><h3>{schedule.name}</h3><Badge kind={due.status}>{DUE_LABELS[due.status]}</Badge></div><p>{due.dueKm !== null ? formatKm(due.dueKm) : ''}{due.dueKm !== null && due.dueDate ? ' or ' : ''}{due.dueDate ? formatDate(due.dueDate) : ''}{due.status === 'unconfigured' ? 'Add an interval from your manual or mechanic.' : !due.dueKm && !due.dueDate ? 'Add a matching completed service or a baseline.' : ''}</p></div><button className="icon-button" aria-label={`Edit ${schedule.name} schedule`} disabled={!canChange} onClick={() => setDialog({ kind: 'schedule', schedule })}><Pencil size={17} /></button></div>;
+    return <div className="maintenance-row" key={schedule.id}><div className={`maintenance-icon ${due.status}`}><Wrench size={18} /></div><div className="maintenance-content"><div className="row-title"><h3>{schedule.name}</h3><Badge kind={due.status}>{DUE_LABELS[due.status]}</Badge></div><p>{due.dueKm !== null ? formatKm(due.dueKm) : ''}{due.dueKm !== null && due.dueDate ? ' or ' : ''}{due.dueDate ? formatDate(due.dueDate) : due.reviewDate ? `Suggested check by ${formatDate(due.reviewDate)}` : due.status === 'unconfigured' ? 'Add an interval from your manual or mechanic.' : 'Record a last-service baseline.'}</p></div><button className="icon-button" aria-label={`Edit ${schedule.name} schedule`} disabled={!canChange} onClick={() => setDialog({ kind: 'schedule', schedule })}><Pencil size={17} /></button></div>;
   }
-  function followupRow(f: FollowUp) { const overdue = !f.done && f.dueDate && f.dueDate <= todayISO(); return <div className={`followup-row ${f.done ? 'completed' : ''}`} key={f.id}><button className="icon-button" aria-label={f.done ? `Reopen ${f.title}` : `Complete ${f.title}`} disabled={!canChange} onClick={() => void mutate({ ...doc, followUps: doc.followUps.map(x => x.id === f.id ? { ...x, done: !x.done } : x) })}>{f.done ? <CheckCircle2 size={21} /> : <Circle size={21} />}</button><div><h3>{f.title}</h3><p>{f.dueDate ? `${overdue ? 'Due ' : 'Reminder: '}${formatDate(f.dueDate)}` : 'No reminder date'}{f.serviceId && ' · Linked to a service'}</p></div>{overdue && <Badge kind="overdue">Due</Badge>}<button className="icon-button" aria-label={`Edit follow-up ${f.title}`} disabled={!canChange} onClick={() => setDialog({ kind: 'followup', followup: f })}><Pencil size={16} /></button><button className="icon-button danger-text" aria-label={`Delete follow-up ${f.title}`} disabled={!canChange} onClick={() => confirm('Delete follow-up?', f.title, () => mutate({ ...doc, followUps: doc.followUps.filter(x => x.id !== f.id) }))}><Trash2 size={16} /></button></div>; }
+  function followupRow(f: FollowUp) { const overdue = !f.done && f.dueDate && f.dueDate <= todayISO(); return <div className={`followup-row ${f.done ? 'completed' : ''}`} key={f.id}><button className="icon-button" aria-label={f.done ? `Reopen ${f.title}` : `Complete ${f.title}`} disabled={!canChange} onClick={() => void mutate({ ...doc, followUps: doc.followUps.map(x => x.id === f.id ? { ...x, done: !x.done } : x) })}>{f.done ? <CheckCircle2 size={21} /> : <Circle size={21} />}</button><div><h3>{f.title}</h3><p>{f.dueDate ? `${overdue ? 'Due ' : f.dueDateSuggested ? 'Suggested check-in: ' : 'Reminder: '}${formatDate(f.dueDate)}` : 'Reminder cleared; edit to choose a date'}{f.serviceId && ' · Linked to a service'}</p></div>{overdue && <Badge kind="overdue">Due</Badge>}<button className="icon-button" aria-label={`Edit follow-up ${f.title}`} disabled={!canChange} onClick={() => setDialog({ kind: 'followup', followup: f })}><Pencil size={16} /></button><button className="icon-button danger-text" aria-label={`Delete follow-up ${f.title}`} disabled={!canChange} onClick={() => confirm('Delete follow-up?', f.title, () => mutate({ ...doc, followUps: doc.followUps.filter(x => x.id !== f.id) }))}><Trash2 size={16} /></button></div>; }
   const common = { onClose: closeDialog, busy: !!busy, online: online && !!auth, onReconnect: connect };
 
   return <div className="app-shell">
     <aside className="sidebar"><a className="brand" href="./" onClick={e => { e.preventDefault(); navigate('dashboard'); }}><span className="brand-icon">S</span><span>Sayarathy<small>Car maintenance</small></span></a><nav aria-label="Main navigation">{NAV.map(n => <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => navigate(n.id)} aria-current={view === n.id ? 'page' : undefined}><n.icon size={19} /><span>{n.label}</span>{n.id === 'followups' && openFollowups.length > 0 && <small>{openFollowups.length}</small>}</button>)}</nav><div className="sidebar-bottom"><div><Cloud size={20} /><p>Your Drive.<br /><strong>Your records.</strong></p></div>{!install.installed && <button className="install-link" onClick={() => install.available ? void install.install() : setDialog({ kind: 'install' })}><Smartphone size={17} />Install Sayarathy</button>}<a href="./privacy.html">Privacy</a><a href="./terms.html">Terms</a></div></aside>
-    <div className="app-main"><header className="topbar"><a className="mobile-brand" href="./">Sayarathy</a><span className="topbar-vehicle">{doc.vehicle.make} {doc.vehicle.model} <span>{doc.vehicle.year}</span></span><div className="connection-controls"><span className={`connection ${auth && online ? 'connected' : ''}`}>{online ? <Cloud size={15} /> : <CloudOff size={15} />}<span>{!online ? 'Internet required' : busy || (dirty ? 'Unsaved changes' : syncing && auth ? 'Syncing with Drive' : auth && !driveLoaded ? 'Sync needed' : file && auth ? 'Synced with Drive' : auth ? 'New log' : 'Drive disconnected')}</span></span>{auth && file && <button className="icon-button" aria-label="Reload from Google Drive" disabled={!!busy || dirty || !online} onClick={() => void execute('Syncing with Google Drive', () => loadFile(file, client()))}><RefreshCw size={17} /></button>}{!auth && <button className="primary small" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>Connect Drive</button>}</div></header>
+    <div className="app-main"><header className="topbar"><a className="mobile-brand" href="./">Sayarathy</a><span className="topbar-vehicle">{doc.vehicle.make} {doc.vehicle.model} <span>{doc.vehicle.year}</span></span><div className="connection-controls"><span className={`connection ${auth && online ? 'connected' : ''}`}>{online ? <Cloud size={15} /> : <CloudOff size={15} />}<span>{!online ? 'Internet required' : busy || (dirty ? 'Unsaved changes' : syncing && auth ? 'Syncing with Drive' : auth && !driveLoaded ? 'Sync needed' : file && auth ? 'Synced with Drive' : auth ? 'New log' : hasRememberedLogin ? 'Access renewal needed' : 'Drive disconnected')}</span></span>{auth && file && <button className="icon-button" aria-label="Reload from Google Drive" disabled={!!busy || dirty || !online} onClick={() => void execute('Syncing with Google Drive', () => loadFile(file, client()))}><RefreshCw size={17} /></button>}{!auth && <button className="primary small" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>{hasRememberedLogin ? 'Continue Drive' : 'Connect Drive'}</button>}</div></header>
     <main>
       {!online && <div className="notice offline" role="status"><CloudOff size={20} /><div><strong>You’re offline</strong><p>Sayarathy needs an internet connection. Saving, loading, and uploads are unavailable; changes are not queued.</p></div></div>}
       {error && <div className="notice error" role="alert"><AlertCircle size={20} /><div><strong>The operation did not finish</strong><p>{error}</p></div><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
       {message && !error && <div className="message" role="status"><Check size={16} />{message}<button className="icon-button" aria-label="Dismiss message" onClick={() => setMessage('')}><X size={15} /></button></div>}
       {dirty && <div className="notice pending"><AlertCircle size={20} /><div><strong>Your changes have not been saved to Drive</strong><p>This draft is only in this open page. Retry saving, or download a copy before leaving.</p><div className="button-row"><button className="primary small" disabled={!online || !auth || !!busy} onClick={() => void mutate(doc, 'Retrying save')}>Retry save</button><button className="small" onClick={() => exportDoc(doc)}>Download draft</button><button className="text-button" disabled={!!busy} onClick={() => confirm('Discard unsaved changes?', 'The loaded Drive version will replace this in-memory draft. Any already uploaded attachments remain in Drive.', async () => { setDoc(savedDoc.current); setDirty(false); setError(''); })}>Discard draft</button></div></div></div>}
-      {!auth && <div className="connect-banner"><div><h2>Your records stay in your Google Drive</h2><p>Connect to load your log, add a service, or save a change. No account with Sayarathy is needed.</p></div><button className="primary" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>Connect Google Drive</button>{!googleReady && <button className="text-button" disabled={!!busy} onClick={() => loadGoogle().then(() => setGoogleReady(true)).catch(e => setError(e.message))}>Retry Google authorization</button>}</div>}
+      {!auth && <div className="connect-banner"><div><h2>{hasRememberedLogin ? 'Your sign-in is remembered' : 'Your records stay in your Google Drive'}</h2><p>{hasRememberedLogin ? `Remembered until ${new Date(remembered!.rememberUntil).toLocaleString()}. Google’s shorter-lived Drive access needs renewal; continue to reopen your log automatically.` : 'Connect to load your log, add a service, or save a change. Your sign-in will be remembered for one day.'}</p></div><button className="primary" disabled={!online || !googleReady || !!busy || !clientId.trim()} onClick={connect}>{hasRememberedLogin ? 'Continue Google Drive' : 'Connect Google Drive'}</button>{!googleReady && <button className="text-button" disabled={!!busy} onClick={() => loadGoogle().then(() => setGoogleReady(true)).catch(e => setError(e.message))}>Retry Google authorization</button>}</div>}
       {auth && driveLoaded && !file && !dirty && <div className="notice"><Cloud size={20} /><div><strong>Start your Camry log</strong><p>Create an empty log in Drive, or restore a backup from Settings.</p></div><button className="primary small" disabled={!canChange} onClick={() => void mutate(doc, 'Creating your log')}>Create my log</button></div>}
       <div className="page-heading"><div><h1>{view === 'dashboard' ? 'Your car, at a glance.' : NAV.find(n => n.id === view)?.label}</h1><p>{view === 'dashboard' ? 'A little history makes the next service clearer.' : view === 'history' ? 'Every visit, repair, and replacement in one place.' : view === 'maintenance' ? 'Your manual or mechanic sets the intervals. We do the calculations.' : view === 'followups' ? 'Keep mechanic advice and unfinished issues in sight.' : 'Your vehicle, Google Drive connection, and backups.'}</p></div>{(view === 'dashboard' || view === 'history') && <button className="primary" disabled={!canChange} onClick={() => setDialog({ kind: 'service' })}><Plus size={18} />Add service</button>}{view === 'maintenance' && <button className="primary" disabled={!canChange} onClick={() => setDialog({ kind: 'schedule' })}><Plus size={18} />Add schedule</button>}{view === 'followups' && <button className="primary" disabled={!canChange} onClick={() => newFollowup()}><Plus size={18} />Add follow-up</button>}</div>
 
@@ -212,12 +238,37 @@ export default function App() {
 
       {view === 'history' && <><div className="history-filters"><label><span className="sr-only">Search service history</span><input type="search" aria-label="Search service history" value={search} placeholder="Search work or notes…" onChange={e => setSearch(e.target.value)} /></label><label><span className="sr-only">Filter category</span><select aria-label="Filter category" value={category} onChange={e => setCategory(e.target.value)}><option value="">All categories</option>{Object.entries(CATEGORIES).map(([k,v]) => <option key={k} value={k}>{v}</option>)}</select></label><label className="checkbox-label"><input type="checkbox" checked={reviewOnly} onChange={e => setReviewOnly(e.target.checked)} />Needs clarification</label></div><p className="result-count">{filteredServices.length} {filteredServices.length === 1 ? 'visit' : 'visits'}</p>{filteredServices.length ? <div className="history-list">{filteredServices.map((s, i) => <div key={s.id}>{(i === 0 || s.date.slice(0,4) !== filteredServices[i-1].date.slice(0,4)) && <h2 className="year-heading">{s.date.slice(0,4)}</h2>}{serviceSummary(s)}</div>)}</div> : <div className="panel"><Empty title={services.length ? 'No matching services' : 'No service records yet'}>{services.length ? 'Try another search or category.' : 'Add your first service to start the timeline.'}</Empty></div>}</>}
 
-      {view === 'maintenance' && <><div className="schedule-explainer"><CalendarClock size={21} /><p>Reminders use the last service with the same category and work type. If you set both time and distance, <strong>whichever comes first</strong> applies. Intervals are not manufacturer recommendations.</p></div>{doc.schedules.length ? <div className="schedule-list">{dues.map(({ schedule, due }) => <section className="panel schedule-card" key={schedule.id}><div className="section-heading"><h2>{schedule.name}</h2><Badge kind={due.status}>{DUE_LABELS[due.status]}</Badge></div><div className="schedule-meta"><span>{CATEGORIES[schedule.category]}</span><span>{ACTIONS[schedule.action]}</span></div><div className="schedule-due"><div><span>Next distance target</span><strong>{due.dueKm !== null ? formatKm(due.dueKm) : 'Not available'}</strong>{due.remainingKm !== null && <small>{due.remainingKm > 0 ? `${due.remainingKm.toLocaleString()} km remaining` : `${Math.abs(due.remainingKm).toLocaleString()} km past target`}</small>}</div><div><span>Next date target</span><strong>{due.dueDate ? formatDate(due.dueDate) : 'Not available'}</strong>{due.remainingDays !== null && <small>{due.remainingDays > 0 ? `${due.remainingDays} days remaining` : `${Math.abs(due.remainingDays)} days past target`}</small>}</div></div><p className="help">Interval: {schedule.intervalKm ? formatKm(schedule.intervalKm) : 'Distance not set'}{schedule.intervalMonths ? ` / ${schedule.intervalMonths} months` : ' / Time not set'}<br />Last completed: {due.last.date ? formatDate(due.last.date) : 'No matching completion'}{due.last.km !== null ? ` at ${formatKm(due.last.km)}` : ''}</p>{due.missing.length > 0 && <ul className="missing-data">{due.missing.map(m => <li key={m}>{m}</li>)}</ul>}<div className="card-actions"><button disabled={!canChange} onClick={() => setDialog({ kind: 'schedule', schedule })}><Pencil size={15} />Edit schedule</button><button className="icon-button danger-text" aria-label={`Delete ${schedule.name} schedule`} disabled={!canChange} onClick={() => confirm('Delete maintenance schedule?', 'This removes the reminder rule, not the service history.', () => mutate({ ...doc, schedules: doc.schedules.filter(x => x.id !== schedule.id) }))}><Trash2 size={16} /></button></div></section>)}</div> : <section className="panel"><Empty title="No maintenance schedules">Add a rule using the interval you know from your manual or mechanic.</Empty></section>}</>}
+      {view === 'maintenance' && <>
+        <div className="schedule-explainer"><CalendarClock size={21} /><p><strong>Editable starter recommendations</strong> give you a starting point. Confirm them for your engine, market, driving conditions, and mechanic’s advice. Distance or time applies <strong>whichever comes first</strong>. Tyres and brakes have inspection targets, not invented replacement lifespans.</p></div>
+        {doc.schedules.length ? <div className="schedule-list">{dues.map(({ schedule, due }) => {
+          const recommendation = recommendationFor(schedule);
+          const dateTarget = due.dueDate || due.reviewDate;
+          return <section className="panel schedule-card" key={schedule.id}>
+            <div className="section-heading"><h2>{schedule.name}</h2><Badge kind={due.status}>{DUE_LABELS[due.status]}</Badge></div>
+            <div className="schedule-meta"><span>{CATEGORIES[schedule.category]}</span><span>{ACTIONS[schedule.action]}</span></div>
+            <div className="schedule-due">
+              <div><span>{schedule.action === 'inspect' ? 'Next inspection mileage' : 'Next distance target'}</span><strong>{due.dueKm !== null ? formatKm(due.dueKm) : schedule.intervalKm ? 'Last-service mileage needed' : schedule.intervalMonths ? 'Time-based reminder' : 'Set a distance interval'}</strong>{due.remainingKm !== null && <small>{due.remainingKm > 0 ? `${due.remainingKm.toLocaleString()} km remaining` : `${Math.abs(due.remainingKm).toLocaleString()} km past target`}</small>}</div>
+              <div><span>{due.reviewDate ? 'Suggested history / condition check' : schedule.action === 'inspect' ? 'Next inspection date' : 'Next date target'}</span><strong>{dateTarget ? formatDate(dateTarget) : schedule.intervalMonths ? 'Last-service date needed' : schedule.intervalKm ? 'Distance-based reminder' : 'Set a time interval'}</strong>{due.remainingDays !== null && <small>{due.remainingDays > 0 ? `${due.remainingDays} days remaining` : `${Math.abs(due.remainingDays)} days past target`}</small>}{due.reviewDate && <small>Suggested check, not a replacement deadline.</small>}</div>
+            </div>
+            <p className="help">Interval: {schedule.intervalKm ? formatKm(schedule.intervalKm) : 'No distance interval'}{schedule.intervalMonths ? ` / ${schedule.intervalMonths} months` : ' / No time interval'}<br />{due.last.basis === 'reference' ? 'Timing reference (previous related work)' : due.last.basis === 'baseline' ? 'Your timing baseline' : 'Last matching service'}: {due.last.date ? formatDate(due.last.date) : 'History not confirmed'}{due.last.km !== null ? ` at ${formatKm(due.last.km)}` : ''}</p>
+            {recommendation && <div className="schedule-recommendation"><strong>{recommendationLabel(schedule)}</strong><p>{recommendation.note}</p><a href={OWNER_MANUAL} target="_blank" rel="noreferrer">2006 Camry owner guidance</a></div>}
+            {due.missing.length > 0 && <ul className="missing-data">{due.missing.map(m => <li key={m}>{m}</li>)}</ul>}
+            <div className="card-actions"><button disabled={!canChange} onClick={() => setDialog({ kind: 'schedule', schedule })}><Pencil size={15} />Edit schedule</button><button className="icon-button danger-text" aria-label={`Delete ${schedule.name} schedule`} disabled={!canChange} onClick={() => confirm('Delete maintenance schedule?', 'This removes the reminder rule, not the service history.', () => mutate({ ...doc, schedules: doc.schedules.filter(x => x.id !== schedule.id) }))}><Trash2 size={16} /></button></div>
+          </section>;
+        })}</div> : <section className="panel"><Empty title="No maintenance schedules">Add a rule using an interval from your manual or mechanic.</Empty></section>}
+      </>}
 
       {view === 'followups' && <section className="panel"><div className="tabs" aria-label="Follow-up status"><button className={followupFilter === 'open' ? 'active' : ''} onClick={() => setFollowupFilter('open')}>Open ({openFollowups.length})</button><button className={followupFilter === 'done' ? 'active' : ''} onClick={() => setFollowupFilter('done')}>Completed ({doc.followUps.filter(f => f.done).length})</button></div>{doc.followUps.filter(f => followupFilter === 'done' ? f.done : !f.done).length ? doc.followUps.filter(f => followupFilter === 'done' ? f.done : !f.done).map(followupRow) : <Empty title={followupFilter === 'done' ? 'No completed follow-ups' : 'Nothing to follow up yet'}>Use follow-ups for mechanic advice, issues to monitor, or repairs you want to arrange.</Empty>}</section>}
 
       {view === 'settings' && <div className="settings-grid"><section className="panel"><div className="section-heading"><h2>Your vehicle</h2><button className="text-button" disabled={!canChange} onClick={() => setDialog({ kind: 'vehicle' })}><Pencil size={15} />Edit</button></div><dl className="details-list"><div><dt>Vehicle</dt><dd>{doc.vehicle.make} {doc.vehicle.model}, {doc.vehicle.year}</dd></div><div><dt>Fuel / engine</dt><dd>{doc.vehicle.fuel || 'Not specified'}{doc.vehicle.engine && ` / ${doc.vehicle.engine}`}</dd></div><div><dt>Current mileage</dt><dd>{formatKm(doc.vehicle.odometerKm)}</dd></div><div><dt>Due-soon threshold</dt><dd>{doc.settings.dueSoonKm.toLocaleString()} km or {doc.settings.dueSoonDays} days</dd></div></dl><button disabled={!canChange} onClick={() => setDialog({ kind: 'mileage' })}><Gauge size={16} />Update mileage</button><details className="mileage-history"><summary>Mileage readings ({doc.mileage.length})</summary>{doc.mileage.length ? [...doc.mileage].sort((a,b) => b.date.localeCompare(a.date)).map(m => <div key={m.id}><span>{formatDate(m.date)}</span><strong>{formatKm(m.odometerKm)}</strong></div>) : <p className="help">No current-mileage readings recorded yet.</p>}</details></section>
-        <section className="panel"><div className="section-heading"><h2>Google Drive</h2><Badge kind={auth ? 'upcoming' : ''}>{auth ? 'Connected' : 'Disconnected'}</Badge></div><p className="help">{file ? `Data file: ${file.name}` : 'No data file loaded.'}{syncedAt && <><br />Last saved or loaded: {new Date(syncedAt).toLocaleString()}</>}</p><div className="button-row">{auth ? <><button disabled={!online || !!busy || dirty} onClick={() => void execute('Refreshing Drive files', async () => setFiles(await client().list()))}><RefreshCw size={16} />Refresh files</button><button disabled={!!busy || dirty} onClick={() => { setAuth(null); setFiles([]); dataset(null); const fresh = newDocument(); setDoc(fresh); savedDoc.current = fresh; setSyncedAt(null); setMessage('Disconnected locally. Google permission remains granted; manage it in your Google account.'); }}>Disconnect</button></> : <button className="primary" disabled={!googleReady || !online || !!busy || !clientId.trim()} onClick={connect}>Connect Google Drive</button>}</div>{files.map(f => <div className="cloud-file" key={f.id}><span><strong>{f.name}</strong><small>{f.modifiedTime ? new Date(f.modifiedTime).toLocaleString() : ''}</small></span><button className="small" disabled={!auth || !!busy || dirty || !online} onClick={() => void execute('Opening Drive file', () => loadFile(f, client()))}>{file?.id === f.id ? 'Reload' : 'Open'}</button><button className="icon-button" aria-label={`Download original ${f.name}`} disabled={!auth || !!busy || !online} onClick={() => void execute('Downloading original file', async () => { const original = await client().read(f.id); downloadBlob(new Blob([JSON.stringify(original.data, null, 2)], { type: 'application/json' }), f.name); })}><Download size={16} /></button></div>)}<details className="advanced"><summary>Connection configuration</summary><label>Google OAuth client ID<input value={clientId} disabled={!!auth || !!busy} onChange={e => setClientId(e.target.value)} /></label><p className="help">Public app configuration, not a password. No secret is stored in this app.</p></details></section>
+        <section className="panel">
+          <div className="section-heading"><h2>Google Drive</h2><Badge kind={auth ? 'upcoming' : ''}>{auth ? 'Connected' : hasRememberedLogin ? 'Sign-in remembered' : 'Disconnected'}</Badge></div>
+          <p className="help">{file ? `Data file: ${file.name}` : 'No data file loaded.'}{syncedAt && <><br />Last synced: {new Date(syncedAt).toLocaleString()}</>}{hasRememberedLogin && <><br />Sign-in remembered until {new Date(remembered!.rememberUntil).toLocaleString()}.</>}</p>
+          <div className="button-row">{auth ? <><button disabled={!online || !!busy || dirty} onClick={() => void execute('Refreshing Drive files', async () => setFiles(await client().list()))}><RefreshCw size={16} />Refresh files</button><button disabled={!!busy || dirty} onClick={disconnect}>Sign out</button></> : <button className="primary" disabled={!googleReady || !online || !!busy || !clientId.trim()} onClick={connect}>{hasRememberedLogin ? 'Continue Google Drive' : 'Connect Google Drive'}</button>}</div>
+          <p className="help">Valid Drive access is restored automatically when you reopen the app. Google may require a quick access renewal before the remembered one-day session ends.</p>
+          {files.map(f => <div className="cloud-file" key={f.id}><span><strong>{f.name}</strong><small>{f.modifiedTime ? new Date(f.modifiedTime).toLocaleString() : ''}</small></span><button className="small" disabled={!auth || !!busy || dirty || !online} onClick={() => void execute('Opening Drive file', () => loadFile(f, client()))}>{file?.id === f.id ? 'Reload' : 'Open'}</button><button className="icon-button" aria-label={`Download original ${f.name}`} disabled={!auth || !!busy || !online} onClick={() => void execute('Downloading original file', async () => { const original = await client().read(f.id); downloadBlob(new Blob([JSON.stringify(original.data, null, 2)], { type: 'application/json' }), f.name); })}><Download size={16} /></button></div>)}
+          <details className="advanced"><summary>Connection configuration</summary><label>Google OAuth client ID<input value={clientId} disabled={!!auth || !!busy} onChange={e => setClientId(e.target.value)} /></label><p className="help">Public app configuration, not a password. No OAuth client secret is included in this app.</p></details>
+        </section>
         <section className="panel"><h2>Backup & restore</h2><p className="help">Export your complete log as JSON. Receipts stay in Drive; the backup includes their file references, not the files themselves.</p><div className="button-row"><button onClick={() => exportDoc(doc)}><Download size={16} />Export JSON backup</button><button disabled={!canChange} onClick={() => setDialog({ kind: 'import' })}><Upload size={16} />Restore backup</button></div><p className="help">A restore replaces this log’s vehicle, services, schedules, follow-ups, and mileage history after you confirm.</p></section>
         <section className="panel"><h2>Install Sayarathy</h2><p className="help">Open it from your home screen in its own window. Internet is required; there is no offline mode, cached log, or background sync.</p><button onClick={() => install.available ? void install.install() : setDialog({ kind: 'install' })} disabled={install.installed}><Smartphone size={16} />{install.installed ? 'Running as an installed app' : 'Install or view instructions'}</button><p className="help">Maintenance reminders appear when you open the app. There are no background push notifications.</p></section></div>}
       <footer><span>Sayarathy · Your records belong to you.</span><div><a href="./privacy.html">Privacy</a><a href="./terms.html">Terms</a><a href="mailto:ammarabz10@gmail.com">Contact</a></div></footer>

@@ -9,8 +9,10 @@ export type Action = keyof typeof ACTIONS;
 export interface ServiceItem { id: string; description: string; category: Category; action: Action }
 export interface Attachment { id: string; name: string; mimeType: string; size: number }
 export interface Service { id: string; date: string; odometerKm: number | null; items: ServiceItem[]; notes: string; attachments: Attachment[]; needsReview: boolean }
-export interface Schedule { id: string; name: string; category: Category; action: Action; intervalKm: number | null; intervalMonths: number | null; baselineDate: string | null; baselineKm: number | null }
-export interface FollowUp { id: string; title: string; serviceId: string | null; dueDate: string | null; done: boolean }
+export const RECOMMENDATION_KEYS = ['oil', 'oilFilter', 'coolant', 'acFilter', 'tyres', 'brakePads'] as const;
+export type RecommendationKey = typeof RECOMMENDATION_KEYS[number];
+export interface Schedule { id: string; name: string; category: Category; action: Action; intervalKm: number | null; intervalMonths: number | null; baselineDate: string | null; baselineKm: number | null; recommendationKey?: RecommendationKey; initialReviewDate?: string }
+export interface FollowUp { id: string; title: string; serviceId: string | null; dueDate: string | null; done: boolean; dueDateSuggested?: boolean }
 export interface Mileage { id: string; date: string; odometerKm: number }
 export interface AppDocument {
   schemaVersion: 2;
@@ -19,7 +21,7 @@ export interface AppDocument {
   schedules: Schedule[];
   followUps: FollowUp[];
   mileage: Mileage[];
-  settings: { dueSoonKm: number; dueSoonDays: number };
+  settings: { dueSoonKm: number; dueSoonDays: number; recommendationsVersion?: 1 };
   updatedAt: string;
 }
 export const uid = () => crypto.randomUUID();
@@ -42,24 +44,37 @@ export function newDocument(): AppDocument {
   };
 }
 export function sortServices(services: Service[]) { return [...services].sort((a, b) => b.date.localeCompare(a.date) || (b.odometerKm ?? -1) - (a.odometerKm ?? -1)); }
-export function latestCompletion(schedule: Schedule, services: Service[], today = todayISO()): { date: string | null; km: number | null; serviceId: string | null } {
+export function latestCompletion(schedule: Schedule, services: Service[], today = todayISO()): { date: string | null; km: number | null; serviceId: string | null; basis: 'service' | 'baseline' | 'reference' | 'unknown' } {
   const service = sortServices(services).find(s => s.date <= today && s.items.some(i => i.category === schedule.category && i.action === schedule.action));
   const useService = service && (!schedule.baselineDate || service.date >= schedule.baselineDate);
-  return useService ? { date: service.date, km: service.odometerKm, serviceId: service.id } : { date: schedule.baselineDate, km: schedule.baselineKm, serviceId: null };
+  if (useService) return { date: service.date, km: service.odometerKm, serviceId: service.id, basis: 'service' };
+  if (schedule.baselineDate || schedule.baselineKm !== null) return { date: schedule.baselineDate, km: schedule.baselineKm, serviceId: null, basis: 'baseline' };
+  // An inspection can use replacement / cooling work as a timing reference, but
+  // it is labelled as a reference, never as an inspection that actually happened.
+  if (schedule.action === 'inspect' && schedule.recommendationKey && ['tyres', 'brakePads', 'coolant'].includes(schedule.recommendationKey)) {
+    const reference = sortServices(services).find(s => s.date <= today && s.items.some(i =>
+      schedule.recommendationKey === 'coolant'
+        ? ['coolant', 'cooling'].includes(i.category) && ['replace', 'inspect'].includes(i.action)
+        : i.category === schedule.category && i.action === 'replace'));
+    if (reference) return { date: reference.date, km: reference.odometerKm, serviceId: reference.id, basis: 'reference' };
+  }
+  return { date: null, km: null, serviceId: null, basis: 'unknown' };
 }
+export function addDays(date: string, days: number) { const d = new Date(`${date}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
 export function addMonths(date: string, months: number) {
   const d = new Date(`${date}T00:00:00Z`); const day = d.getUTCDate();
   d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() + months);
   const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
   d.setUTCDate(Math.min(day, lastDay)); return d.toISOString().slice(0, 10);
 }
-export interface Due { status: 'overdue' | 'soon' | 'upcoming' | 'unconfigured' | 'unknown'; dueKm: number | null; dueDate: string | null; remainingKm: number | null; remainingDays: number | null; last: ReturnType<typeof latestCompletion>; missing: string[] }
+export interface Due { status: 'overdue' | 'soon' | 'upcoming' | 'unconfigured' | 'unknown'; dueKm: number | null; dueDate: string | null; reviewDate: string | null; remainingKm: number | null; remainingDays: number | null; last: ReturnType<typeof latestCompletion>; missing: string[] }
 export function maintenanceDue(schedule: Schedule, doc: AppDocument, today = todayISO()): Due {
   const last = latestCompletion(schedule, doc.services, today);
   const dueKm = schedule.intervalKm && last.km !== null ? last.km + schedule.intervalKm : null;
   const dueDate = schedule.intervalMonths && last.date ? addMonths(last.date, schedule.intervalMonths) : null;
+  const reviewDate = (schedule.intervalKm || schedule.intervalMonths) && !dueDate && !last.date && schedule.initialReviewDate ? schedule.initialReviewDate : null;
   const remainingKm = dueKm !== null && doc.vehicle.odometerKm !== null ? dueKm - doc.vehicle.odometerKm : null;
-  const remainingDays = dueDate ? Math.round((Date.parse(dueDate) - Date.parse(today)) / 86400000) : null;
+  const remainingDays = dueDate || reviewDate ? Math.round((Date.parse((dueDate || reviewDate)!) - Date.parse(today)) / 86400000) : null;
   const missing: string[] = [];
   if (schedule.intervalKm && last.km === null) missing.push('Last completion mileage is missing');
   if (schedule.intervalKm && doc.vehicle.odometerKm === null) missing.push('Enter your current mileage');
@@ -69,7 +84,7 @@ export function maintenanceDue(schedule: Schedule, doc: AppDocument, today = tod
   else if ((remainingKm !== null && remainingKm <= 0) || (remainingDays !== null && remainingDays <= 0)) status = 'overdue';
   else if ((remainingKm !== null && remainingKm <= doc.settings.dueSoonKm) || (remainingDays !== null && remainingDays <= doc.settings.dueSoonDays)) status = 'soon';
   else if (remainingKm === null && remainingDays === null) status = 'unknown';
-  return { status, dueKm, dueDate, remainingKm, remainingDays, last, missing };
+  return { status, dueKm, dueDate, reviewDate, remainingKm, remainingDays, last, missing };
 }
 export const DUE_LABELS = { overdue: 'Due now / overdue', soon: 'Due soon', upcoming: 'Upcoming', unconfigured: 'Set intervals', unknown: 'Needs a baseline' };
 
@@ -96,12 +111,15 @@ export function validateDocument(input: unknown): AppDocument {
     attachments: array(s.attachments, 'Attachments', 20).map(x => { const a = object(x); const attachmentId = text(a.id, 'Drive file ID', 200); if (!/^[\w-]{5,200}$/.test(attachmentId)) fail('invalid attachment file ID'); const mimeType = text(a.mimeType, 'Attachment type', 100); if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(mimeType)) fail('unsupported attachment type'); return { id: attachmentId, name: text(a.name, 'Attachment name', 300), mimeType, size: num(a.size, 'Attachment size', false, 10 * 1024 * 1024)! }; }),
   }; });
   if (services.some(s => !s.items.length)) fail('every service must contain completed work');
-  const schedules: Schedule[] = array(root.schedules, 'Schedules', 200).map(x => { const s = object(x); const intervalKm = num(s.intervalKm, 'Distance interval', true); const intervalMonths = num(s.intervalMonths, 'Month interval', true, 1200); if (intervalKm === 0 || intervalMonths === 0) fail('intervals must be positive or unset'); return { id: id(s.id), name: text(s.name, 'Schedule name', 200), category: category(s.category), action: action(s.action), intervalKm, intervalMonths, baselineDate: date(s.baselineDate, 'Baseline date', true), baselineKm: num(s.baselineKm, 'Baseline mileage', true) }; });
+  const schedules: Schedule[] = array(root.schedules, 'Schedules', 200).map(x => { const s = object(x); const intervalKm = num(s.intervalKm, 'Distance interval', true); const intervalMonths = num(s.intervalMonths, 'Month interval', true, 1200); if (intervalKm === 0 || intervalMonths === 0) fail('intervals must be positive or unset');
+    if (s.recommendationKey !== undefined && !RECOMMENDATION_KEYS.includes(s.recommendationKey as RecommendationKey)) fail('unknown recommendation');
+    return { id: id(s.id), name: text(s.name, 'Schedule name', 200), category: category(s.category), action: action(s.action), intervalKm, intervalMonths, baselineDate: date(s.baselineDate, 'Baseline date', true), baselineKm: num(s.baselineKm, 'Baseline mileage', true), ...(s.recommendationKey !== undefined ? { recommendationKey: s.recommendationKey as RecommendationKey } : {}), ...(s.initialReviewDate !== undefined ? { initialReviewDate: date(s.initialReviewDate, 'Suggested review date')! } : {}) }; });
   if (schedules.some(s => !s.name.trim())) fail('schedule names cannot be empty');
-  const followUps: FollowUp[] = array(root.followUps, 'Follow-ups').map(x => { const f = object(x); const serviceId = f.serviceId === null ? null : text(f.serviceId, 'Service reference', 200); if (serviceId && !services.some(s => s.id === serviceId)) fail('follow-up refers to a missing service'); return { id: id(f.id), title: text(f.title, 'Follow-up description', 2000), serviceId, dueDate: date(f.dueDate, 'Follow-up date', true), done: bool(f.done, 'Follow-up status') }; });
+  const followUps: FollowUp[] = array(root.followUps, 'Follow-ups').map(x => { const f = object(x); const serviceId = f.serviceId === null ? null : text(f.serviceId, 'Service reference', 200); if (serviceId && !services.some(s => s.id === serviceId)) fail('follow-up refers to a missing service'); return { id: id(f.id), title: text(f.title, 'Follow-up description', 2000), serviceId, dueDate: date(f.dueDate, 'Follow-up date', true), done: bool(f.done, 'Follow-up status'), ...(f.dueDateSuggested !== undefined ? { dueDateSuggested: bool(f.dueDateSuggested, 'Suggested date status') } : {}) }; });
   if (followUps.some(f => !f.title.trim())) fail('follow-up descriptions cannot be empty');
   const mileage: Mileage[] = array(root.mileage, 'Mileage readings').map(x => { const m = object(x); return { id: id(m.id), date: date(m.date, 'Mileage date')!, odometerKm: num(m.odometerKm, 'Mileage')! }; });
   const settings = object(root.settings);
   const updatedAt = text(root.updatedAt, 'Last update', 100); if (Number.isNaN(Date.parse(updatedAt))) fail('last update timestamp is invalid');
-  return { schemaVersion: 2, vehicle, services, schedules, followUps, mileage, updatedAt, settings: { dueSoonKm: num(settings.dueSoonKm, 'Due-soon distance')!, dueSoonDays: num(settings.dueSoonDays, 'Due-soon days', false, 3650)! } };
+  if (settings.recommendationsVersion !== undefined && settings.recommendationsVersion !== 1) fail('unknown recommendations version');
+  return { schemaVersion: 2, vehicle, services, schedules, followUps, mileage, updatedAt, settings: { dueSoonKm: num(settings.dueSoonKm, 'Due-soon distance')!, dueSoonDays: num(settings.dueSoonDays, 'Due-soon days', false, 3650)!, ...(settings.recommendationsVersion !== undefined ? { recommendationsVersion: 1 as const } : {}) } };
 }

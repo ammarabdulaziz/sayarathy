@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Plus, Trash2, Paperclip } from 'lucide-react';
-import { ACTIONS, CATEGORIES, isDate, numericInput, todayISO, uid, validateDocument, type AppDocument, type FollowUp, type Schedule, type Service } from './model';
+import { ACTIONS, CATEGORIES, addDays, isDate, numericInput, todayISO, uid, validateDocument, type AppDocument, type FollowUp, type Schedule, type Service } from './model';
 import { Modal } from './ui';
 
 type Common = { onClose: () => void; busy: boolean; online: boolean; onReconnect?: () => void };
@@ -44,10 +44,10 @@ export function ScheduleForm({ initial, onSave, ...common }: Common & { initial?
 }
 
 export function FollowUpForm({ initial, services, onSave, ...common }: Common & { initial?: FollowUp; services: Service[]; onSave: (followUp: FollowUp) => Promise<void> }) {
-  const [f, setF] = useState<FollowUp>(initial || { id: uid(), title: '', dueDate: null, serviceId: null, done: false }); const [error, setError] = useState('');
+  const [f, setF] = useState<FollowUp>(() => initial ? { ...initial, ...(!initial.done && !initial.dueDate && initial.dueDateSuggested !== false ? { dueDate: addDays(todayISO(), 7), dueDateSuggested: true } : {}) } : { id: uid(), title: '', dueDate: addDays(todayISO(), 7), dueDateSuggested: true, serviceId: null, done: false }); const [error, setError] = useState('');
   useLeaveWarning(f);
   async function submit(e: FormEvent) { e.preventDefault(); try { if (!f.title.trim()) throw new Error('Describe the issue or follow-up.'); if (f.dueDate && !isDate(f.dueDate)) throw new Error('Enter a valid reminder date.'); await onSave({ ...f, title: f.title.trim() }); common.onClose(); } catch(e) { setError((e as Error).message); } }
-  return <Modal title={initial ? 'Edit follow-up' : 'Add a follow-up'} {...common}><form onSubmit={submit}><fieldset disabled={common.busy}><label>Issue or mechanic advice<textarea required rows={3} maxLength={2000} placeholder="e.g. Monitor for another engine oil leak" value={f.title} onChange={e => setF({ ...f, title: e.target.value })} /></label><label>Reminder date<input type="date" value={f.dueDate || ''} onChange={e => setF({ ...f, dueDate: e.target.value || null })} /></label><label>Related service<select value={f.serviceId || ''} onChange={e => setF({ ...f, serviceId: e.target.value || null })}><option value="">No linked service</option>{services.map(s => <option key={s.id} value={s.id}>{s.date} · {s.items[0]?.description}</option>)}</select></label></fieldset><ErrorMessage error={error} /><Buttons {...common} label="Save follow-up" /></form></Modal>;
+  return <Modal title={initial?.title.trim() ? 'Edit follow-up' : 'Add a follow-up'} {...common}><form onSubmit={submit}><fieldset disabled={common.busy}><label>Issue or mechanic advice<textarea required rows={3} maxLength={2000} placeholder="e.g. Monitor for another engine oil leak" value={f.title} onChange={e => setF({ ...f, title: e.target.value })} /></label><label>Reminder date<input type="date" value={f.dueDate || ''} onChange={e => setF({ ...f, dueDate: e.target.value || null, dueDateSuggested: false })} /></label><p className="help">A one-week check-in is suggested by default. Bring it forward for an urgent issue, or change/clear the date to suit your plan.</p><label>Related service<select value={f.serviceId || ''} onChange={e => setF({ ...f, serviceId: e.target.value || null })}><option value="">No linked service</option>{services.map(s => <option key={s.id} value={s.id}>{s.date} · {s.items[0]?.description}</option>)}</select></label></fieldset><ErrorMessage error={error} /><Buttons {...common} label="Save follow-up" /></form></Modal>;
 }
 
 export function MileageForm({ doc, onSave, ...common }: Common & { doc: AppDocument; onSave: (km: number, date: string) => Promise<void> }) {

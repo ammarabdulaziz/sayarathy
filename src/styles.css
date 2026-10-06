@@ -73,3 +73,64 @@ footer { margin-top: 38px; padding: 22px 0 28px; border-top: 1px solid var(--lin
 @media (max-width: 780px) { .sidebar { inset: auto 0 0; width: 100%; height: auto; padding: 6px 4px max(6px,env(safe-area-inset-bottom)); border-right: 0; border-top: 1px solid var(--line); }.sidebar .brand,.sidebar-bottom { display: none; }.sidebar nav { flex-direction: row; padding: 0; gap: 2px; }.sidebar nav button { flex: 1; flex-direction: column; gap: 4px; padding: 8px 2px; font-size: 9px; border-radius: 5px; }.sidebar nav button > small { display: none; }.app-main { padding-left: 0; padding-bottom: 80px; }.topbar { padding: 14px 20px; min-height: 64px; position: sticky; top: 0; z-index: 30; }.mobile-brand { display: block; font-weight: 750; font-size: 19px; text-decoration: none; color: #142742; }.topbar-vehicle { display: none; }.connection { font-size: 10px; }.connection-controls { gap: 3px; }main { padding: 24px 20px 0; }.page-heading { align-items: flex-start; gap: 15px; }h1 { font-size: 25px; }.page-heading p { font-size: 11px; }.page-heading > button { font-size: 11px; padding: 8px 11px; }.page-heading > button svg { width: 15px; }.vehicle-overview { padding: 23px; }.vehicle-overview h2 { font-size: 36px; }.vehicle-overview > div { min-width: 0; }.car-drawing { width: 43%; }.schedule-list,.settings-grid { grid-template-columns: 1fr; }.connect-banner { flex-wrap: wrap; padding: 17px; gap: 12px; }.connect-banner button { padding: 8px 12px; font-size: 12px; }.notice { flex-wrap: wrap; }.notice > div { flex: 1; min-width: 180px; }.notice > button:last-child { margin-left: 32px; }.history-filters > label:first-child { min-width: 100%; }.history-filters select { max-width: none; }.history-filters > label:nth-child(2) { flex: 1; }.history-filters > .checkbox-label { width: auto; }.service-summary { gap: 14px; padding: 17px; }.service-date { width: 105px; }.service-description h3 { font-size: 12px; }.service-description p { font-size: 10px; }.followup-row { gap: 7px; }.followup-row > .badge { display: none; }.followup-row h3 { font-size: 11px; }footer { flex-direction: column; gap: 12px; }.modal-backdrop { padding: 16px 12px; }.modal { max-height: 94dvh; }.modal-heading { padding: 17px 20px; }.modal-body,.modal form { padding: 18px 20px; }.schedule-due strong { font-size: 17px; } }
 @media (max-width: 450px) { main { padding-inline: 16px; }.topbar { padding-inline: 16px; }.connection > span { max-width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.page-heading { flex-wrap: wrap; }.page-heading > button { margin-top: -4px; }.vehicle-overview { padding: 21px; }.car-drawing { width: 140px; position: absolute; right: -20px; top: 26px; opacity: .55; }.vehicle-overview > div { width: 100%; }.mileage-display { max-width: 230px; }.panel { padding: 18px; }.section-heading h2 { font-size: 14px; }.section-heading .text-button { font-size: 10px; }.service-summary { gap: 11px; }.service-date { width: 89px; }.service-date strong { font-size: 10px; }.service-date span { font-size: 10px; }.compact .service-date { width: 90px; }.service-summary > svg { width: 14px; }.form-grid { gap: 12px; }.item-options { grid-template-columns: 1fr auto; }.item-options > label:first-child { grid-column: 1 / -1; }.item-options > label:nth-child(2) { grid-column: 1; }.form-grid input,.form-grid select { font-size: 13px; }.details-list dt { width: 105px; }.followup-row .icon-button { width: 28px; padding: 4px; }.form-actions { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+/* Readable supporting type. Large page/vehicle headings keep their existing sizes. */
+:root { font-size: 16px; }
+button { font-size: 15px; }
+.small, .text-button, .install-link { font-size: 14px; }
+input, select, textarea, .work-item input, .work-item select, .form-grid input, .form-grid select { font-size: 16px; }
+label, .work-item label, .checkbox-label { font-size: 14px; }
+.sidebar nav button { font-size: 15px; }
+.brand small, .sidebar nav small, .sidebar-bottom a { font-size: 13px; }
+.sidebar-bottom p { font-size: 14px; }
+.topbar-vehicle { font-size: 15px; }
+.connection { font-size: 13px; }
+.page-heading p, .connect-banner p, .notice, .help, .quiet-empty, .panel-footnote,
+.maintenance-content p, .service-description p, .compact .service-description p,
+.followup-row p, .schedule-explainer p, .details-list, .draft-hint { font-size: 15px; }
+.modal-body > p { font-size: 16px; }
+.modal-body .help, .form-error, .import-summary { font-size: 14px; }
+.connect-banner h2, .section-heading h2 { font-size: 18px; }
+.section-heading .text-button { font-size: 14px; }
+.row-title h3, .service-description h3, .compact .service-description h3, .followup-row h3 { font-size: 16px; }
+.service-description h3 small { font-size: 13px; }
+.service-date strong, .service-date span, .compact .service-date strong, .compact .service-date span { font-size: 14px; }
+.attachment-count, .badge, .section-heading .count { font-size: 12px; }
+.maintenance-counts, .schedule-meta, .schedule-due span, .schedule-due small,
+.missing-data, .advanced, .mileage-history, .mileage-history > div, .cloud-file > span,
+.cloud-file small, .vehicle-overview > div > p, .vehicle-specs,
+.mileage-display > span, .mileage-display > small { font-size: 14px; }
+.schedule-due strong { font-size: 18px; }
+.vehicle-action, .card-actions > button:first-child { font-size: 14px; }
+.file-picker input, .attachment-row small, .detail-work small, footer { font-size: 13px; }
+.attachment-row, .detail-work { font-size: 15px; }
+.service-date { width: 145px; }
+.compact .service-date { width: 120px; }
+.schedule-due { flex-wrap: wrap; }
+.schedule-due > div { min-width: 145px; }
+.review-callout { font-size: 14px; }
+.schedule-recommendation { padding: 15px; background: #f4f7fc; border: 1px solid var(--line); border-radius: 7px; font-size: 14px; line-height: 1.65; }
+.schedule-recommendation strong { font-weight: 650; color: var(--blue); }
+.schedule-recommendation p { padding: 7px 0; }
+.schedule-recommendation a { font-size: 14px; }
+@media (max-width: 780px) {
+  .sidebar nav button { font-size: 12px; min-height: 66px; line-height: 1.35; }
+  .app-main { padding-bottom: 100px; }
+  .connection-controls:has(button.primary) .connection > span { display: none; }
+  .page-heading > button { font-size: 14px; }
+  .connect-banner button { font-size: 15px; }
+  .history-filters { gap: 12px; }
+  .history-filters > .checkbox-label { width: 100%; }
+}
+@media (max-width: 450px) {
+  .connection > span { max-width: 135px; }
+  .service-date, .compact .service-date { width: 106px; }
+  .service-date strong, .service-date span, .compact .service-date strong, .compact .service-date span { font-size: 13px; }
+  .service-description h3, .compact .service-description h3, .followup-row h3 { font-size: 15px; }
+  .service-description p, .compact .service-description p { font-size: 14px; }
+  .section-heading { flex-wrap: wrap; }
+  .notice > div { min-width: 160px; }
+  .form-grid { grid-template-columns: 1fr; }
+  .item-options { grid-template-columns: 1fr auto; }
+  .item-options > label:first-child { grid-column: 1 / -1; }
+}

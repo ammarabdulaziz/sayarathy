@@ -21,7 +21,8 @@ Google Drive. Receipts and photos are separate private Drive files.
   to the app, regaining connectivity, or once a minute while it is visible.
 - Installable PWA on compatible mobile and desktop browsers.
 
-The app does not supply manufacturer maintenance intervals or mechanical diagnoses.
+The app supplies clearly labelled, editable starter recommendations, not a certified
+factory schedule or mechanical diagnosis. Existing custom intervals are preserved.
 Maintenance notifications are in-app; there are no background push notifications.
 
 ## Run locally
@@ -47,13 +48,21 @@ or serve the built app at an already authorized origin.
 
 The Google Cloud project is `sayarathy`, with the **Sayarathy** OAuth app and
 **Sayarathy Web** browser client. Google Identity Services obtains a short-lived
-`drive.file` access token in the browser; tokens are kept only in memory. No client
+`drive.file` access token in the browser. No client
 secret, service account, backend, or operator-owned database is used.
+
+Sign-in is remembered on the device for **24 hours**. The browser stores the
+remembered deadline and current access token in localStorage, reusing the token
+only until its actual Google expiry. Reloading within that valid window restores
+Drive automatically. Expired/rejected tokens are removed; the remembered session
+offers **Continue Google Drive** to renew permission via a user gesture. Google's
+token model cannot guarantee uninterrupted 24-hour Drive authorization without a
+backend refresh-token flow. Sign out clears the stored session.
 
 After authorization, the app automatically opens the last-used authorized data
 file. If no preference exists, it selects the newest valid log with records before
 considering empty duplicates. The preferred file ID is stored locally per OAuth
-client, but tokens and log contents are not. IDs absent from the currently
+client; log contents are not cached. IDs absent from the currently
 authorized account are ignored.
 
 While connected and visible, the app checks file metadata on focus, on returning
@@ -103,6 +112,18 @@ internet access to open again.
 - Distance and date targets are calculated independently, using whichever is due first.
 - Month intervals clamp to valid month-end dates.
 - Historical service mileage is not automatically treated as current mileage.
+- Unconfigured default rules receive starter intervals once: oil/filter 5,000 km
+  or 6 months; coolant/brake checks 5,000 km or 6 months; AC filter review 15,000 km
+  or 12 months; tyre inspection/rotation review 8,000 km or 6 months.
+- These are conservative planning values, not exact market/engine-specific Toyota
+  requirements. The 2006 U.S. manual's oil reminder is 8,000 km; our starter is earlier.
+- Tyre/brake replacement is condition-based. Recommended inspection rules may
+  use earlier replacement work as an explicitly labelled timing reference.
+- Unknown baselines get a suggested condition/history review in one week, not an
+  invented service or replacement deadline. New follow-ups default to a suggested
+  one-week check-in; existing user dates are preserved.
+- `settings.recommendationsVersion` makes the initial upgrade one-time. History,
+  receipts, existing custom intervals, and user-entered dates remain intact.
 - The pre-save checksum check detects stale content but is **not an atomic lock**.
   Simultaneous saves can still race; use one editing device at a time.
 
@@ -123,6 +144,11 @@ not an application asset, fixture, or public sample. Do not commit personal hist
 Automated tests exercise reminder dates/distance, completion matching, missing
 data, backup validation, stale-content detection, private binary uploads, and downloads.
 Real OAuth and Drive behavior require a live signed-in browser.
+
+Recommendation references: [2006 Camry owner's manual, Toyota publication OM33708U](https://cdn.dealereprocess.org/cdn/servicemanuals/toyota/2006-camry.pdf),
+including the oil reminder (p.126), filter guidance (p.192), coolant checks (p.311),
+and tyre condition/age/rotation guidance (pp.317–320). Suggested intervals are
+labelled as app starters rather than quoted factory requirements.
 
 For a full acceptance pass: connect, restore a backup, add/edit a temporary service,
 upload and preview a receipt, configure a schedule, update mileage, add/complete a
